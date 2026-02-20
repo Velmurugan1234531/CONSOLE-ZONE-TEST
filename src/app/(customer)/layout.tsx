@@ -34,6 +34,8 @@ if (typeof window !== "undefined") {
 
 import { LocationProvider } from "@/context/LocationContext";
 import { PublicLayoutWrapper } from "@/components/PublicLayoutWrapper";
+import { SpeedInsights } from "@vercel/speed-insights/next";
+
 
 export default function RootLayout({
   children,
@@ -68,8 +70,10 @@ export default function RootLayout({
             </AuthProvider>
           </VisualsProvider>
         </QueryProvider>
+        <SpeedInsights />
       </body>
     </html>
+
   );
 }
 
