@@ -9,7 +9,7 @@ export const createClient = () => {
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-    if (!supabaseUrl || !supabaseKey) {
+    if (!supabaseUrl?.trim() || !supabaseKey?.trim()) {
         console.warn('⚠️  Supabase Credentials not found. Using offline/placeholder mode.');
         return createBrowserClient(
             'https://placeholder.supabase.co',
