@@ -49,10 +49,17 @@ export default function SignupPage() {
             setSuccess(true);
             setLoading(false);
         } catch (err: any) {
-            console.error("Signup failed", err);
-            let msg = "Registration failed.";
-            if (err.code === 'auth/email-already-in-use') msg = "Email already in use.";
-            if (err.code === 'auth/weak-password') msg = "Password should be at least 6 characters.";
+            let msg = "Registration failed. Please try again.";
+            if (err.code === 'auth/email-already-in-use') {
+                msg = "This email is already registered. Please log in instead.";
+            } else if (err.code === 'auth/weak-password') {
+                msg = "Password should be at least 6 characters.";
+            } else if (err.code === 'auth/invalid-email') {
+                msg = "Please enter a valid email address.";
+            } else {
+                // Only log unexpected errors
+                console.error("Signup failed:", err.code, err.message);
+            }
             setError(msg);
             setLoading(false);
         }
