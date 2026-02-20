@@ -18,6 +18,7 @@ import {
 } from "@/types/auth";
 import { useRouter } from "next/navigation";
 import { mapUserToCamelCase } from "@/services/admin-auth";
+import { resetOfflineMode, OfflineError } from "@/utils/firebase-utils";
 import { safeGetDoc } from "@/utils/firebase-utils";
 
 interface AuthContextType {
@@ -65,14 +66,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             checkAndApplyAdminPass(firebaseUser, err);
 
             if (isMounted.current && !isWhitelistedAdmin(firebaseUser.email)) {
-                // Don't set global error for offline/network issues, just log it.
-                // This prevents the entire app from crashing showing "OfflineError".
-                if (err.message === "Network timeout or offline mode active" || err.code === "unavailable") {
-                    console.warn("AuthContext: Suppressing offline error to keep UI active.");
-                    // Optionally set a specialized 'offline' state if needed, but for now just don't crash.
-                    // maybe set userDocument to null so they are treated as 'no profile' aka guest/customer logic might apply?
-                } else {
+                // Suppress offline/timeout errors — don't crash the UI for connectivity issues.
+                const isOffline = err.name === 'OfflineError' ||
+                    err.code === 'unavailable' ||
+                    (err.message && (err.message.toLowerCase().includes('offline') || err.message.toLowerCase().includes('timed out')));
+                if (!isOffline) {
                     setError(err);
+                } else {
+                    console.warn("AuthContext: Suppressing offline/timeout error to keep UI active.");
                 }
             }
         }
@@ -136,6 +137,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
         const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
             console.log("🔥 Auth State Changed:", currentUser ? "Logged In" : "Logged Out");
+            // Reset offline mode on each auth state change so fresh connections are tried
+            resetOfflineMode();
 
             if (isMounted.current) {
                 setUser(currentUser);

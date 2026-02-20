@@ -9,9 +9,9 @@ import {
 } from "firebase/firestore";
 
 // Global state to track connectivity health
-// If true, we skip network attempts and fail fast
 let globalOfflineMode = false;
-const TIMEOUT_MS = 5000; // Increased to 5s for slower networks
+const TIMEOUT_MS = 8000;         // Normal timeout
+const RETRY_TIMEOUT_MS = 3000;   // Short retry when already "offline"
 
 // Auto-recovery timer
 let recoveryTimer: NodeJS.Timeout | null = null;
@@ -32,11 +32,17 @@ export const setSystemOffline = (status: boolean) => {
         globalOfflineMode = status;
 
         if (status) {
-            // Try to auto-recover after 30 seconds
+            // Try to auto-recover after 15 seconds (was 30s)
             if (recoveryTimer) clearTimeout(recoveryTimer);
-            recoveryTimer = setTimeout(tryRecover, 30000);
+            recoveryTimer = setTimeout(tryRecover, 15000);
         }
     }
+};
+
+export const resetOfflineMode = () => {
+    if (recoveryTimer) clearTimeout(recoveryTimer);
+    globalOfflineMode = false;
+    recoveryTimer = null;
 };
 
 export class OfflineError extends Error {
@@ -46,30 +52,38 @@ export class OfflineError extends Error {
     }
 }
 
+const isOfflineError = (error: any): boolean => {
+    return (
+        error instanceof OfflineError ||
+        error.code === 'unavailable' ||
+        (error.message && (
+            error.message.includes('offline') ||
+            error.message.includes('Offline') ||
+            error.message.includes('timed out') ||
+            error.message.includes('Timed Out')
+        ))
+    );
+};
+
 /**
  * Wraps getDocs with a timeout and offline check.
- * Fails fast if globalOfflineMode is true.
+ * When in offline mode, still tries with a shorter timeout to allow recovery.
  */
 export async function safeGetDocs<T>(q: Query<T>): Promise<QuerySnapshot<T>> {
-    if (globalOfflineMode) {
-        // Silent fail path? No, caller usually expects to catch.
-        throw new OfflineError("Offline Mode Active (Fast Fail)");
-    }
+    // Use shorter timeout if we think we're offline (give it a chance to recover)
+    const timeoutDuration = globalOfflineMode ? RETRY_TIMEOUT_MS : TIMEOUT_MS;
 
     const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new OfflineError("Operation Timed Out")), TIMEOUT_MS);
+        setTimeout(() => reject(new OfflineError("Operation Timed Out")), timeoutDuration);
     });
 
     try {
         const result = await Promise.race([getDocs(q), timeoutPromise]);
+        // If we succeeded, we are online
+        if (globalOfflineMode) setSystemOffline(false);
         return result;
     } catch (error: any) {
-        // If it's our timeout or a connection error, set offline mode
-        const isOffline = error instanceof OfflineError ||
-            error.code === 'unavailable' ||
-            (error.message && error.message.includes('offline'));
-
-        if (isOffline) {
+        if (isOfflineError(error)) {
             setSystemOffline(true);
         }
         throw error;
@@ -78,25 +92,23 @@ export async function safeGetDocs<T>(q: Query<T>): Promise<QuerySnapshot<T>> {
 
 /**
  * Wraps getDoc with a timeout and offline check.
+ * When in offline mode, still tries with a shorter timeout to allow recovery.
  */
 export async function safeGetDoc<T>(ref: DocumentReference<T>): Promise<DocumentSnapshot<T>> {
-    if (globalOfflineMode) {
-        throw new OfflineError("Offline Mode Active (Fast Fail)");
-    }
+    // Use shorter timeout if we think we're offline (give it a chance to recover)
+    const timeoutDuration = globalOfflineMode ? RETRY_TIMEOUT_MS : TIMEOUT_MS;
 
     const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new OfflineError("Operation Timed Out")), TIMEOUT_MS);
+        setTimeout(() => reject(new OfflineError("Operation Timed Out")), timeoutDuration);
     });
 
     try {
         const result = await Promise.race([getDoc(ref), timeoutPromise]);
+        // If we succeeded, we are online
+        if (globalOfflineMode) setSystemOffline(false);
         return result;
     } catch (error: any) {
-        const isOffline = error instanceof OfflineError ||
-            error.code === 'unavailable' ||
-            (error.message && error.message.includes('offline'));
-
-        if (isOffline) {
+        if (isOfflineError(error)) {
             setSystemOffline(true);
         }
         throw error;
