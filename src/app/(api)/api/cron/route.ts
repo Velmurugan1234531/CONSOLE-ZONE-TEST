@@ -1,45 +1,37 @@
-import { createClient } from "@/lib/supabase/server";
-import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
+import { db } from "@/lib/firebase";
+import { collection, query, where, getDocs, updateDoc, doc, writeBatch } from "firebase/firestore";
+import { safeGetDocs } from "@/utils/firebase-utils";
 
 export async function GET(req: Request) {
-    // Basic security check (e.g., Cron secret)
-    // const authHeader = req.headers.get('authorization');
-    // if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) { ... }
-
     try {
-        const cookieStore = await cookies();
-        const supabase = createClient(cookieStore);
-
         // 1. Check for overdue rentals
         const now = new Date().toISOString();
+        const rentalsRef = collection(db, "rentals");
+        const q = query(
+            rentalsRef,
+            where("status", "==", "active"),
+            where("end_date", "<", now)
+        );
 
-        const { data: overdueRentals, error } = await supabase
-            .from('rentals')
-            .select('*')
-            .eq('status', 'active')
-            .lt('end_date', now);
+        const snapshot = await safeGetDocs(q);
 
-        if (error) throw error;
+        if (!snapshot.empty) {
+            const batch = writeBatch(db);
+            snapshot.docs.forEach((item) => {
+                const docRef = doc(db, "rentals", item.id);
+                batch.update(docRef, { status: "overdue" });
+            });
 
-        if (overdueRentals && overdueRentals.length > 0) {
-            // Update status to 'overdue'
-            const ids = overdueRentals.map(r => r.id);
-
-            const { error: updateError } = await supabase
-                .from('rentals')
-                .update({ status: 'overdue' })
-                .in('id', ids);
-
-            if (updateError) throw updateError;
+            await batch.commit();
 
             // In a real app, send emails here
-            // await sendOverdueEmails(ids);
+            // await sendOverdueEmails(snapshot.docs.map(d => d.id));
         }
 
         return NextResponse.json({
             success: true,
-            processed: overdueRentals?.length || 0,
+            processed: snapshot.size || 0,
             message: "Automation checks completed."
         });
 

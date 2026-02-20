@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { auth, db } from "@/lib/firebase";
+import { onAuthStateChanged, signOut, User as FirebaseUser } from "firebase/auth";
+import { doc, getDoc } from "firebase/firestore";
 import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { Loader2, LogOut, User, Mail, Shield, Gamepad2, Zap, TrendingUp, Calendar, Package, Wrench, DollarSign, CheckCircle2, Clock, XCircle } from "lucide-react";
@@ -14,9 +16,10 @@ import { getUserTradeInRequests } from "@/services/tradeins";
 import { getUserSales } from "@/services/sales";
 import KYCForm from "@/components/KYCForm";
 import { format } from "date-fns";
+import { safeGetDoc } from "@/utils/firebase-utils";
 
 export default function ProfilePage() {
-    const [user, setUser] = useState<any>(null);
+    const [user, setUser] = useState<FirebaseUser | null>(null);
     const [rentals, setRentals] = useState<any[]>([]);
     const [serviceBookings, setServiceBookings] = useState<any[]>([]);
     const [tradeIns, setTradeIns] = useState<any[]>([]);
@@ -27,12 +30,19 @@ export default function ProfilePage() {
 
     const router = useRouter();
     const { settings } = useVisuals();
-    const supabase = createClient();
 
     useEffect(() => {
         const fetchUserData = async (uid: string) => {
             try {
-                setProfile({ kyc_status: 'NOT_SUBMITTED', neural_sync_xp: 750 }); // Test mode: KYC not submitted
+                // Fetch Profile from Firestore
+                const userDocRef = doc(db, "users", uid);
+                const userSnap = await safeGetDoc(userDocRef);
+
+                if (userSnap.exists()) {
+                    setProfile(userSnap.data());
+                } else {
+                    setProfile({ kyc_status: 'NOT_SUBMITTED', neural_sync_xp: 0 });
+                }
 
                 const [rentalData, serviceData, tradeInData, salesData] = await Promise.all([
                     getUserRentals(uid).catch(err => {
@@ -64,43 +74,30 @@ export default function ProfilePage() {
             }
         };
 
-        const checkUser = async () => {
-            const { data: { session } } = await supabase.auth.getSession();
-            if (session?.user) {
-                setUser(session.user);
-                fetchUserData(session.user.id);
+        const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+            if (currentUser) {
+                setUser(currentUser);
+                fetchUserData(currentUser.uid);
             } else {
                 const demoUser = localStorage.getItem('DEMO_USER_SESSION');
                 if (demoUser) {
                     const parsed = JSON.parse(demoUser);
                     setUser(parsed);
                     setProfile({ kyc_status: 'APPROVED', neural_sync_xp: 750 });
-                    fetchUserData(parsed.id || 'demo-user-123');
+                    fetchUserData(parsed.id || parsed.uid || 'demo-user-123');
                 } else {
                     router.push("/login");
                 }
             }
-        };
-
-        checkUser();
-
-        const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-            if (session?.user) {
-                setUser(session.user);
-                fetchUserData(session.user.id);
-            } else if (event === 'SIGNED_OUT') {
-                setUser(null);
-                router.push("/login");
-            }
         });
 
-        return () => subscription.unsubscribe();
-    }, [router, supabase]);
+        return () => unsubscribe();
+    }, [router]);
 
     const handleSignOut = async () => {
         setLoading(true);
         try {
-            await supabase.auth.signOut();
+            await signOut(auth);
             localStorage.removeItem('DEMO_USER_SESSION');
             router.push("/");
             router.refresh();
@@ -110,7 +107,7 @@ export default function ProfilePage() {
         }
     };
 
-    if (loading) {
+    if (loading && !user) {
         return (
             <div className="min-h-screen bg-[#050505] flex items-center justify-center">
                 <Loader2 className="animate-spin text-[#A855F7]" size={40} />
@@ -119,7 +116,6 @@ export default function ProfilePage() {
     }
 
     const activeRentals = rentals.filter(r => ['active', 'overdue', 'shipped'].includes(r.status));
-    const completedRentals = rentals.filter(r => ['completed', 'cancelled'].includes(r.status));
     const totalSpent = sales.reduce((sum, s) => sum + (s.total_amount || 0), 0);
     const totalEarned = tradeIns.filter(t => t.status === 'approved').reduce((sum, t) => sum + (t.offered_credit || 0), 0);
 
@@ -133,17 +129,15 @@ export default function ProfilePage() {
             />
 
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 -mt-32 relative z-20 pb-20">
-                {/* Profile Header Card */}
                 <motion.div
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
                     className="bg-gradient-to-br from-[#A855F7] to-[#7C3AED] rounded-3xl p-8 mb-8 shadow-2xl shadow-purple-500/20"
                 >
                     <div className="flex flex-col md:flex-row items-center md:items-start gap-6">
-                        {/* Avatar */}
                         <div className="w-24 h-24 rounded-2xl overflow-hidden border-4 border-white/20 shadow-xl shrink-0">
-                            {user?.user_metadata?.avatar_url ? (
-                                <img src={user.user_metadata.avatar_url} alt="" className="w-full h-full object-cover" />
+                            {user?.photoURL || (user as any)?.user_metadata?.avatar_url ? (
+                                <img src={user?.photoURL || (user as any)?.user_metadata?.avatar_url} alt="" className="w-full h-full object-cover" />
                             ) : (
                                 <div className="w-full h-full bg-white/10 flex items-center justify-center">
                                     <User size={40} className="text-white/60" />
@@ -151,15 +145,13 @@ export default function ProfilePage() {
                             )}
                         </div>
 
-                        {/* User Info */}
                         <div className="flex-1 text-center md:text-left">
                             <h1 className="text-3xl font-black text-white mb-2">
-                                {user?.user_metadata?.full_name || user?.email?.split('@')[0] || 'Gamer'}
+                                {user?.displayName || (user as any)?.user_metadata?.full_name || user?.email?.split('@')[0] || 'Gamer'}
                             </h1>
                             <p className="text-white/80 text-sm mb-4">{user?.email}</p>
 
                             <div className="flex flex-wrap gap-3 justify-center md:justify-start">
-                                {/* KYC Badge */}
                                 {profile?.kyc_status === 'APPROVED' ? (
                                     <div className="flex items-center gap-2 px-4 py-2 bg-white/10 backdrop-blur-sm rounded-full border border-white/20">
                                         <Shield size={16} className="text-emerald-400" />
@@ -171,19 +163,19 @@ export default function ProfilePage() {
                                         className="flex items-center gap-2 px-4 py-2 bg-white/10 hover:bg-white/20 backdrop-blur-sm rounded-full border border-white/20 transition-all"
                                     >
                                         <Shield size={16} className="text-yellow-400" />
-                                        <span className="text-xs font-bold text-white uppercase tracking-wide">Complete KYC</span>
+                                        <span className="text-xs font-bold text-white uppercase tracking-wide">
+                                            {profile?.kyc_status === 'PENDING' ? 'Verification Pending' : 'Complete KYC'}
+                                        </span>
                                     </button>
                                 )}
 
-                                {/* XP Level */}
                                 <div className="flex items-center gap-2 px-4 py-2 bg-white/10 backdrop-blur-sm rounded-full border border-white/20">
                                     <Zap size={16} className="text-yellow-400" />
-                                    <span className="text-xs font-bold text-white uppercase tracking-wide">{profile?.neural_sync_xp || 0} XP</span>
+                                    <span className="text-xs font-bold text-white uppercase tracking-wide">{profile?.neural_sync_xp || (profile as any)?.xp || 0} XP</span>
                                 </div>
                             </div>
                         </div>
 
-                        {/* Logout Button */}
                         <button
                             onClick={handleSignOut}
                             className="px-6 py-3 bg-white/10 hover:bg-white/20 backdrop-blur-sm rounded-xl border border-white/20 text-white font-bold text-sm flex items-center gap-2 transition-all"
@@ -194,7 +186,6 @@ export default function ProfilePage() {
                     </div>
                 </motion.div>
 
-                {/* Stats Grid */}
                 <div className="mb-8">
                     <motion.div
                         initial={{ opacity: 0, y: 20 }}
@@ -212,7 +203,6 @@ export default function ProfilePage() {
                     </motion.div>
                 </div>
 
-                {/* Tab Navigation */}
                 <div className="flex gap-2 mb-6 bg-[#0a0a0a] border border-white/10 rounded-2xl p-2">
                     {(['overview', 'activity', 'transactions', 'kyc'] as const).map((tab) => (
                         <button
@@ -228,7 +218,6 @@ export default function ProfilePage() {
                     ))}
                 </div>
 
-                {/* Tab Content */}
                 <AnimatePresence mode="wait">
                     {activeTab === 'overview' && (
                         <motion.div
@@ -238,7 +227,6 @@ export default function ProfilePage() {
                             exit={{ opacity: 0, y: -20 }}
                             className="space-y-6"
                         >
-                            {/* Active Rentals */}
                             <div className="bg-[#0a0a0a] border border-white/10 rounded-2xl p-6">
                                 <h2 className="text-xl font-black text-white mb-4 uppercase tracking-tight flex items-center gap-2">
                                     <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
@@ -257,7 +245,7 @@ export default function ProfilePage() {
                                                 <div className="flex-1">
                                                     <h3 className="font-bold text-white">{rental.product?.name}</h3>
                                                     <p className="text-xs text-gray-400">
-                                                        {format(new Date(rental.start_date), 'MMM dd')} - {format(new Date(rental.end_date), 'MMM dd')}
+                                                        {rental.start_date && format(new Date(rental.start_date), 'MMM dd')} - {rental.end_date && format(new Date(rental.end_date), 'MMM dd')}
                                                     </p>
                                                 </div>
                                                 <div className={`px-3 py-1 rounded-full text-xs font-bold uppercase ${rental.status === 'active' ? 'bg-emerald-500/10 text-emerald-500' :
@@ -282,7 +270,6 @@ export default function ProfilePage() {
                             exit={{ opacity: 0, y: -20 }}
                             className="bg-[#0a0a0a] border border-white/10 rounded-2xl p-6"
                         >
-                            {/* Services */}
                             <h2 className="text-lg font-black text-white mb-4 uppercase tracking-tight flex items-center gap-2">
                                 <Wrench size={18} className="text-cyan-500" />
                                 Active Services
@@ -295,7 +282,7 @@ export default function ProfilePage() {
                                         <div key={svc.id} className="bg-white/5 rounded-lg p-4 flex items-center justify-between">
                                             <div>
                                                 <h4 className="font-bold text-white text-sm mb-1">{svc.service_type}</h4>
-                                                <p className="text-xs text-gray-400">{svc.console_model} • {format(new Date(svc.created_at), 'MMM dd, yyyy')}</p>
+                                                <p className="text-xs text-gray-400">{svc.console_model} • {svc.created_at && format(new Date(svc.created_at), 'MMM dd, yyyy')}</p>
                                             </div>
                                             <span className={`text-[10px] font-bold px-3 py-1 rounded-full ${svc.status === 'Completed' ? 'bg-emerald-500/20 text-emerald-500' :
                                                 svc.status === 'Cancelled' ? 'bg-red-500/20 text-red-500' :
@@ -316,7 +303,6 @@ export default function ProfilePage() {
                             exit={{ opacity: 0, y: -20 }}
                             className="grid md:grid-cols-2 gap-6"
                         >
-                            {/* Purchases */}
                             <div className="bg-[#0a0a0a] border border-white/10 rounded-2xl p-6">
                                 <h2 className="text-lg font-black text-white mb-4 uppercase tracking-tight flex items-center gap-2">
                                     <Package size={18} className="text-purple-500" />
@@ -329,17 +315,16 @@ export default function ProfilePage() {
                                         {sales.map((sale) => (
                                             <div key={sale.id} className="bg-white/5 rounded-lg p-3">
                                                 <div className="flex justify-between items-start mb-1">
-                                                    <h4 className="font-bold text-white text-sm">{sale.items[0]?.product_name || "Product"}</h4>
+                                                    <h4 className="font-bold text-white text-sm">{sale.items?.[0]?.product_name || "Product"}</h4>
                                                     <span className="text-xs font-bold text-white">₹{(sale.total_amount || 0).toLocaleString()}</span>
                                                 </div>
-                                                <p className="text-xs text-gray-400">{format(new Date(sale.date), 'MMM dd, yyyy')}</p>
+                                                <p className="text-xs text-gray-400">{sale.date && format(new Date(sale.date), 'MMM dd, yyyy')}</p>
                                             </div>
                                         ))}
                                     </div>
                                 )}
                             </div>
 
-                            {/* Trade-Ins */}
                             <div className="bg-[#0a0a0a] border border-white/10 rounded-2xl p-6">
                                 <h2 className="text-lg font-black text-white mb-4 uppercase tracking-tight flex items-center gap-2">
                                     <TrendingUp size={18} className="text-yellow-500" />
@@ -356,7 +341,7 @@ export default function ProfilePage() {
                                                     <span className="text-xs font-bold text-yellow-500">+₹{(trade.offered_credit || 0).toLocaleString()}</span>
                                                 </div>
                                                 <div className="flex justify-between items-center">
-                                                    <p className="text-xs text-gray-400">{format(new Date(trade.created_at), 'MMM dd, yyyy')}</p>
+                                                    <p className="text-xs text-gray-400">{trade.created_at && format(new Date(trade.created_at), 'MMM dd, yyyy')}</p>
                                                     <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${trade.status === 'approved' ? 'bg-emerald-500/20 text-emerald-500' :
                                                         trade.status === 'rejected' ? 'bg-red-500/20 text-red-500' :
                                                             'bg-orange-500/20 text-orange-500'

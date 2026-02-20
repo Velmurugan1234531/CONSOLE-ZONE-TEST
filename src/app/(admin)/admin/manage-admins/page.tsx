@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { createClient } from "@/lib/supabase/client";
-import { getCurrentUserRole, AdminUser, UserRole, resetLoginAttempts } from "@/services/admin-auth";
+import { db } from "@/lib/firebase";
+import { doc, updateDoc } from "firebase/firestore";
+import { getAllAdminUsers, AdminUser, UserRole, resetLoginAttempts } from "@/services/admin-auth";
 import { logAdminAction } from "@/services/admin-logs";
 import { useAuth, useRequireRole } from "@/context/AuthContext";
 import { motion } from "framer-motion";
@@ -20,52 +21,21 @@ import {
 
 export default function ManageAdminsPage() {
     useRequireRole("admin");
-    const [currentUser, setCurrentUser] = useState<AdminUser | null>(null);
+    const { userDocument: currentUser } = useAuth();
     const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
     const [loading, setLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState("");
     const [processing, setProcessing] = useState<string | null>(null);
-    const supabase = createClient();
 
     useEffect(() => {
         loadData();
     }, []);
 
     const loadData = async () => {
-        const { data: { user } } = await supabase.auth.getUser();
-        if (!user) return;
-
+        setLoading(true);
         try {
-            // Get current user
-            const userData = await getCurrentUserRole(user.id);
-            setCurrentUser(userData);
-
-            // Get all admin users from Supabase
-            const { data: admins, error } = await supabase
-                .from('users')
-                .select('*')
-                .in('role', ["super_admin", "admin", "sub_admin", "staff"]);
-
-            if (error) throw error;
-
-            // Map snake_case to camelCase
-            const mappedAdmins = admins.map((a: any) => ({
-                id: a.id,
-                uid: a.id, // compatibility
-                email: a.email,
-                fullName: a.full_name || a.display_name || "New User",
-                role: a.role,
-                isActive: a.is_active,
-                createdAt: a.created_at,
-                createdBy: a.created_by,
-                lastLogin: a.last_login,
-                lastLoginIP: a.last_login_ip,
-                loginAttempts: a.login_attempts,
-                emailVerified: a.email_verified,
-                metadata: a.metadata
-            })) as AdminUser[];
-
-            setAdminUsers(mappedAdmins);
+            const admins = await getAllAdminUsers();
+            setAdminUsers(admins);
         } catch (error) {
             console.error("Failed to load admins:", error);
         } finally {
@@ -83,7 +53,7 @@ export default function ManageAdminsPage() {
         }
 
         // Cannot disable yourself
-        if (targetUser.id === currentUser.id) {
+        if (targetUser.uid === currentUser.uid) {
             alert("You cannot disable your own account");
             return;
         }
@@ -92,22 +62,18 @@ export default function ManageAdminsPage() {
             return;
         }
 
-        setProcessing(targetUser.id);
+        setProcessing(targetUser.uid);
 
         try {
-            const { error } = await supabase
-                .from('users')
-                .update({ is_active: !targetUser.isActive })
-                .eq('id', targetUser.id);
-
-            if (error) throw error;
+            const userDocRef = doc(db, "users", targetUser.uid);
+            await updateDoc(userDocRef, { isActive: !targetUser.isActive });
 
             // Log action
             await logAdminAction({
-                adminId: currentUser.id,
+                adminId: currentUser.uid,
                 adminEmail: currentUser.email,
                 action: targetUser.isActive ? "disable_user" : "enable_user",
-                targetUserId: targetUser.id,
+                targetUserId: targetUser.uid,
                 targetUserEmail: targetUser.email,
                 ipAddress: "client-ip", // In real app, fetch from API or headers
                 details: { previousState: targetUser.isActive }
@@ -136,17 +102,17 @@ export default function ManageAdminsPage() {
             return;
         }
 
-        setProcessing(targetUser.id);
+        setProcessing(targetUser.uid);
 
         try {
-            await resetLoginAttempts(targetUser.id, currentUser.id);
+            await resetLoginAttempts(targetUser.uid, currentUser.uid);
 
             // Log action
             await logAdminAction({
-                adminId: currentUser.id,
+                adminId: currentUser.uid,
                 adminEmail: currentUser.email,
                 action: "reset_login_attempts",
-                targetUserId: targetUser.id,
+                targetUserId: targetUser.uid,
                 targetUserEmail: targetUser.email,
                 ipAddress: "client-ip",
                 details: { previousAttempts: targetUser.loginAttempts }
@@ -177,7 +143,7 @@ export default function ManageAdminsPage() {
         }
     };
 
-    const filteredAdmins = adminUsers.filter(user =>
+    const filteredAdmins = adminUsers.filter((user: AdminUser) =>
         user.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
         user.fullName.toLowerCase().includes(searchTerm.toLowerCase()) ||
         user.role.toLowerCase().includes(searchTerm.toLowerCase())
@@ -209,7 +175,7 @@ export default function ManageAdminsPage() {
                             <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-4 py-2">
                                 <p className="text-yellow-500 font-bold text-xs uppercase tracking-wider flex items-center gap-2">
                                     <AlertCircle size={16} />
-                                    Create via Supabase Auth
+                                    Create via Firebase Console
                                 </p>
                             </div>
                         )}
@@ -229,9 +195,9 @@ export default function ManageAdminsPage() {
                         <div className="flex items-start gap-3">
                             <Shield className="text-blue-500 flex-shrink-0 mt-1" size={24} />
                             <div>
-                                <h3 className="text-blue-500 font-black uppercase tracking-tight mb-2">Admin Creation via Supabase Auth</h3>
+                                <h3 className="text-blue-500 font-black uppercase tracking-tight mb-2">Admin Creation via Firebase</h3>
                                 <p className="text-gray-400 text-sm mb-3">
-                                    Admin accounts should be created via Supabase Invite functionality or by signing up and elevating role via database.
+                                    Admin accounts should be created via Firebase Console or by signing up and elevating role via Firestore.
                                 </p>
                             </div>
                         </div>
@@ -245,7 +211,7 @@ export default function ManageAdminsPage() {
                         <input
                             type="text"
                             value={searchTerm}
-                            onChange={(e) => setSearchTerm(e.target.value)}
+                            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSearchTerm(e.target.value)}
                             placeholder="Search by email, name, or role..."
                             className="
                   w-full bg-white/5 border border-white/10 rounded-xl

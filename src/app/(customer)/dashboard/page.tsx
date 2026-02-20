@@ -1,9 +1,8 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { useAuth } from "@/context/AuthContext";
 import { useRouter } from "next/navigation";
-import { User } from "@supabase/supabase-js";
 import { motion } from "framer-motion";
 import { FileText, StickyNote, Users, Loader2 } from "lucide-react";
 import MyFilesSection from "@/components/dashboard/MyFilesSection";
@@ -13,36 +12,15 @@ import TeamMembersSection from "@/components/dashboard/TeamMembersSection";
 type TabType = "files" | "notes" | "team";
 
 export default function DashboardPage() {
-    const [user, setUser] = useState<User | null>(null);
-    const [loading, setLoading] = useState(true);
+    const { user, userDocument, loading } = useAuth();
     const [activeTab, setActiveTab] = useState<TabType>("files");
     const router = useRouter();
-    const supabase = createClient();
 
     useEffect(() => {
-        const checkUser = async () => {
-            const { data: { session } } = await supabase.auth.getSession();
-            if (session?.user) {
-                setUser(session.user);
-                setLoading(false);
-            } else {
-                router.push("/login");
-            }
-        };
-
-        checkUser();
-
-        const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-            if (session?.user) {
-                setUser(session.user);
-                setLoading(false);
-            } else if (event === 'SIGNED_OUT') {
-                router.push("/login");
-            }
-        });
-
-        return () => subscription.unsubscribe();
-    }, [router, supabase]);
+        if (!loading && !user) {
+            router.push("/login");
+        }
+    }, [user, loading, router]);
 
     if (loading) {
         return (
@@ -67,7 +45,7 @@ export default function DashboardPage() {
                 <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
                     <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
                         <h1 className="text-5xl font-black text-white italic tracking-tighter uppercase mb-2">
-                            Welcome, <span className="text-[#A855F7]">{user.user_metadata?.full_name || user.email?.split('@')[0] || "User"}</span>
+                            Welcome, <span className="text-[#A855F7]">{userDocument?.fullName || user.displayName || user.email?.split('@')[0] || "User"}</span>
                         </h1>
                         <p className="text-gray-500 text-xs font-black uppercase tracking-[0.2em]">
                             Your Personal Command Center
@@ -109,8 +87,8 @@ export default function DashboardPage() {
 
                 {/* Tab Content */}
                 <div className="py-8">
-                    {activeTab === "files" && <MyFilesSection userId={user.id} />}
-                    {activeTab === "notes" && <MyNotesSection userId={user.id} />}
+                    {activeTab === "files" && <MyFilesSection userId={user.uid} />}
+                    {activeTab === "notes" && <MyNotesSection userId={user.uid} />}
                     {activeTab === "team" && <TeamMembersSection />}
                 </div>
             </div>

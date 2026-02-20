@@ -1,8 +1,6 @@
 
 import { NextResponse } from "next/server";
 import Razorpay from "razorpay";
-import { createClient } from "@/lib/supabase/server";
-import { cookies } from "next/headers";
 import { PLANS, ADDONS } from "@/constants";
 
 // Robust key handling avoiding strict '!' to prevent crash if env is missing
@@ -43,23 +41,13 @@ async function calculateServerPrice(
     let baseRate = 0;
     let controllerRate = 0;
 
-    // 1. Fetch Pricing from Supabase
+    // 1. Fetch Pricing from Firestore
     let settings: any = null;
-    const cookieStore = await cookies();
-    const supabase = createClient(cookieStore);
-
     try {
-        const { data, error } = await supabase
-            .from('catalog_settings')
-            .select('*')
-            .eq('device_category', category)
-            .single();
-
-        if (!error && data) {
-            settings = data;
-        }
+        const { getCatalogSettingsByCategory } = await import("@/services/catalog");
+        settings = await getCatalogSettingsByCategory(category);
     } catch (e) {
-        console.warn("Supabase pricing fetch failed:", e);
+        console.warn("Firestore pricing fetch failed:", e);
     }
 
     if (settings) {

@@ -1,4 +1,8 @@
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    addDoc
+} from "firebase/firestore";
 
 export const AdminMonitorAI = {
     /**
@@ -15,22 +19,19 @@ export const AdminMonitorAI = {
             // TODO: Trigger auto-lockout or email alert
         }
 
-        // Persist to audit (using existing table logic or new service)
-        const supabase = createClient();
-
+        // Persist to Firestore Audit Log
         try {
-            await supabase.from('audit_logs').insert({
+            await addDoc(collection(db, 'audit_logs'), {
                 user_id: adminId,
                 action: action,
                 metadata: metadata,
                 severity: severity, // info, warning, critical
-                event_type: 'ADMIN_ACTION', // Added to satisfy table schema constraint if any, or just for consistency
+                event_type: 'ADMIN_ACTION',
                 request_id: metadata?.requestId, // Optional if we have it
                 created_at: timestamp
             });
         } catch (e) {
-            // fast fail
-            console.warn("AI Monitor log failed", e);
+            console.warn("AI Monitor log failed (Firestore)", e);
         }
     }
 };

@@ -1,4 +1,10 @@
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import {
+    doc,
+    getDoc,
+    setDoc
+} from "firebase/firestore";
+import { safeGetDoc } from "@/utils/firebase-utils";
 
 export interface MarketplaceSettings {
     tradeInRate: number; // Percentage of shelf price paid in cash (e.g., 0.4)
@@ -35,6 +41,8 @@ const DEFAULT_SETTINGS: MarketplaceSettings = {
 };
 
 const SETTINGS_KEY = 'marketplace_settings';
+const COLLECTION = 'settings';
+const DOC_ID = 'marketplace';
 
 export const getMarketplaceSettings = (): MarketplaceSettings => {
     if (typeof window === 'undefined') return DEFAULT_SETTINGS;
@@ -50,32 +58,23 @@ export const getMarketplaceSettings = (): MarketplaceSettings => {
 };
 
 /**
- * Fetch settings from Supabase and sync to local storage
+ * Fetch settings from Firestore and sync to local storage
  */
 export const syncMarketplaceSettings = async (): Promise<MarketplaceSettings> => {
-    const supabase = createClient();
-
     try {
-        const { data, error } = await supabase
-            .from('settings')
-            .select('value')
-            .eq('key', 'marketplace')
-            .single();
+        const docRef = doc(db, COLLECTION, DOC_ID);
+        const docSnap = await safeGetDoc(docRef);
 
-        if (data) {
-            const settings = data.value as MarketplaceSettings;
+        if (docSnap.exists()) {
+            const settings = docSnap.data() as MarketplaceSettings;
             if (typeof window !== 'undefined') {
                 localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
             }
             return { ...DEFAULT_SETTINGS, ...settings };
         }
 
-        if (error && error.code !== 'PGRST116') { // PGRST116 is "Row not found" which is fine (use defaults)
-            console.warn("Marketplace sync warning:", error.message);
-        }
-
     } catch (e) {
-        console.warn("Marketplace sync failed:", e);
+        console.warn("Marketplace sync failed (Firestore):", e);
     }
     return getMarketplaceSettings();
 };
@@ -85,19 +84,15 @@ export const saveMarketplaceSettings = async (settings: MarketplaceSettings) => 
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
     }
 
-    const supabase = createClient();
     try {
-        const { error } = await supabase
-            .from('settings')
-            .upsert({
-                key: 'marketplace',
-                value: settings,
-                updated_at: new Date().toISOString()
-            }, { onConflict: 'key' }); // Ensure key is unique constraint
+        const docRef = doc(db, COLLECTION, DOC_ID);
+        await setDoc(docRef, {
+            ...settings,
+            updated_at: new Date().toISOString()
+        }, { merge: true });
 
-        if (error) throw error;
     } catch (e) {
-        console.error("Supabase settings save failed:", e);
+        console.error("Firestore settings save failed:", e);
     }
 };
 

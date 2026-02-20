@@ -1,4 +1,16 @@
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    query,
+    where,
+    orderBy,
+    doc,
+    getDoc,
+    updateDoc,
+    addDoc,
+    setDoc
+} from "firebase/firestore";
+import { safeGetDocs, safeGetDoc } from "@/utils/firebase-utils";
 
 export interface TradeInRequest {
     id: string;
@@ -50,41 +62,45 @@ export interface SellOrder {
 }
 
 export const getTradeInRequests = async (): Promise<TradeInRequest[]> => {
-    const supabase = createClient();
-
     try {
-        const { data, error } = await supabase
-            .from('trade_in_requests')
-            .select(`
-                *,
-                users (
-                    full_name,
-                    email
-                )
-            `)
-            .order('created_at', { ascending: false });
+        const trRef = collection(db, "trade_in_requests");
+        const q = query(trRef, orderBy("created_at", "desc"));
+        const snapshot = await safeGetDocs(q);
 
-        if (error) {
-            console.error("Supabase getTradeInRequests error:", error);
+        if (snapshot.empty) {
             return getMockTradeInRequests();
         }
 
-        return data.map((item: any) => ({
-            id: item.id,
-            user_id: item.user_id,
-            user_name: item.users?.full_name || item.users?.email || "Unknown User",
-            item_name: item.item_name,
-            category: item.category,
-            condition: item.condition,
-            description: item.description,
-            images: item.images || [],
-            status: item.status || 'pending',
-            offered_credit: item.offered_credit || 0,
-            created_at: item.created_at
-        })) as TradeInRequest[];
+        const requests = await Promise.all(snapshot.docs.map(async (trDoc) => {
+            const tr = trDoc.data();
+            let userName = "Unknown User";
 
+            if (tr.user_id) {
+                const userSnap = await safeGetDoc(doc(db, "users", tr.user_id));
+                if (userSnap.exists()) {
+                    const u = userSnap.data();
+                    userName = u.full_name || u.display_name || u.email || "Unknown User";
+                }
+            }
+
+            return {
+                id: trDoc.id,
+                user_id: tr.user_id,
+                user_name: userName,
+                item_name: tr.item_name,
+                category: tr.category,
+                condition: tr.condition,
+                description: tr.description,
+                images: tr.images || [],
+                status: tr.status || 'pending',
+                offered_credit: tr.offered_credit || 0,
+                created_at: tr.created_at
+            } as TradeInRequest;
+        }));
+
+        return requests;
     } catch (error) {
-        console.error("getTradeInRequests failed:", error);
+        console.error("getTradeInRequests Firestore failed:", error);
         return getMockTradeInRequests();
     }
 };
@@ -119,27 +135,17 @@ const getMockTradeInRequests = (): TradeInRequest[] => [
 ];
 
 export const updateTradeInStatus = async (id: string, status: TradeInRequest['status'], credit?: number) => {
-    const supabase = createClient();
-
     try {
+        const trRef = doc(db, "trade_in_requests", id);
         const updates: any = { status, updated_at: new Date().toISOString() };
         if (credit !== undefined) updates.offered_credit = credit;
 
-        const { error } = await supabase
-            .from('trade_in_requests')
-            .update(updates)
-            .eq('id', id);
-
-        if (error) throw error;
+        await updateDoc(trRef, updates);
 
         // Notification logic
-        const { data: request } = await supabase
-            .from('trade_in_requests')
-            .select('user_id, item_name')
-            .eq('id', id)
-            .single();
-
-        if (request) {
+        const requestSnap = await safeGetDoc(trRef);
+        if (requestSnap.exists()) {
+            const request = requestSnap.data();
             try {
                 const { sendNotification } = await import("./notifications");
                 await sendNotification({
@@ -166,33 +172,20 @@ export const getUserTradeInRequests = async (userId: string): Promise<TradeInReq
         return allTradeIns.filter(t => t.user_id === 'u-001' || t.user_id === 'demo-user-123');
     }
 
-    const supabase = createClient();
-
     try {
-        const { data, error } = await supabase
-            .from('trade_in_requests')
-            .select('*')
-            .eq('user_id', userId)
-            .order('created_at', { ascending: false });
+        const trRef = collection(db, "trade_in_requests");
+        const q = query(trRef, where("user_id", "==", userId), orderBy("created_at", "desc"));
+        const snapshot = await safeGetDocs(q);
 
-        if (error) throw error;
+        const userSnap = await safeGetDoc(doc(db, "users", userId));
+        const userData = userSnap.exists() ? userSnap.data() : null;
+        const userName = userData?.full_name || userData?.email || "User";
 
-        // Need user details
-        // Optimization: For own requests, we know the user name
-        // But for admin view (mapped from getTradeInRequests), we join.
-        // Here we just return data, maybe fetch user detail if needed or assume caller knows user
-
-        // Actually the interface asks for user_name, so let's try to get it if possible, or just use defaults
-        // Since this is getUserTradeInRequests, usually called by the user themselves, so name isn't critical or we can fetch profile
-
-        const { data: userProfile } = await supabase.from('users').select('full_name, email').eq('id', userId).single();
-        const userName = userProfile?.full_name || userProfile?.email || "User";
-
-        return data.map((item: any) => ({
-            ...item,
+        return snapshot.docs.map((item: any) => ({
+            id: item.id,
+            ...item.data(),
             user_name: userName
         })) as TradeInRequest[];
-
     } catch (error) {
         console.error("getUserTradeInRequests failed:", error);
         return [];
@@ -234,16 +227,15 @@ export const createSellOrder = async (
     pincode: string,
     userInfo?: { name?: string; email?: string; phone?: string; address?: string }
 ): Promise<SellOrder> => {
-    // Phase 11: Apply Global Buyback Multiplier (Mocked or from Settings)
     let multiplier = 1.0;
     try {
         const { getMarketplaceSettings } = await import("./marketplace-settings");
-        multiplier = getMarketplaceSettings().multipliers?.buyback || 1.0;
+        const settings = await getMarketplaceSettings();
+        multiplier = settings.multipliers?.buyback || 1.0;
     } catch (e) {
         console.warn("Sell Order: Failed to fetch pricing multipliers", e);
     }
 
-    // Calculate totals with multiplier
     const totalCashValue = Math.round(items.reduce((sum, item) => sum + (item.cash_price * item.quantity), 0) * multiplier);
     const totalCreditValue = Math.round(items.reduce((sum, item) => sum + (item.credit_price * item.quantity), 0) * multiplier);
 
@@ -265,19 +257,8 @@ export const createSellOrder = async (
         updated_at: new Date().toISOString()
     };
 
-    const supabase = createClient();
     try {
-        const { data, error } = await supabase
-            .from('sell_orders')
-            .insert(sellOrderData)
-            .select()
-            .single();
-
-        if (error) {
-            console.error("Supabase createSellOrder failed:", error);
-            // Fallback to local
-            return createLocalSellOrder(sellOrderData);
-        }
+        const docRef = await addDoc(collection(db, "sell_orders"), sellOrderData);
 
         // Send notification
         try {
@@ -292,10 +273,9 @@ export const createSellOrder = async (
             console.warn("Notification failed:", e);
         }
 
-        return data as SellOrder;
-
+        return { id: docRef.id, ...sellOrderData } as SellOrder;
     } catch (error) {
-        console.error("createSellOrder failed:", error);
+        console.error("createSellOrder Firestore failed:", error);
         return createLocalSellOrder(sellOrderData);
     }
 };
@@ -313,36 +293,37 @@ const createLocalSellOrder = (data: any): SellOrder => {
 };
 
 export const getAllSellOrders = async (): Promise<SellOrder[]> => {
-    const supabase = createClient();
-
     try {
-        const { data, error } = await supabase
-            .from('sell_orders')
-            .select('*')
-            .order('created_at', { ascending: false });
+        const ordersRef = collection(db, "sell_orders");
+        const q = query(ordersRef, orderBy("created_at", "desc"));
+        const snapshot = await safeGetDocs(q);
 
-        if (error) throw error;
+        if (snapshot.empty) {
+            return getMockSellOrders();
+        }
 
-        return data as SellOrder[];
+        return snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+        })) as SellOrder[];
     } catch (error) {
-        console.error("getAllSellOrders failed:", error);
+        console.error("getAllSellOrders Firestore failed:", error);
         return getMockSellOrders();
     }
 };
 
 export const getUserSellOrders = async (userId: string): Promise<SellOrder[]> => {
-    const supabase = createClient();
     try {
-        const { data, error } = await supabase
-            .from('sell_orders')
-            .select('*')
-            .eq('user_id', userId)
-            .order('created_at', { ascending: false });
+        const ordersRef = collection(db, "sell_orders");
+        const q = query(ordersRef, where("user_id", "==", userId), orderBy("created_at", "desc"));
+        const snapshot = await safeGetDocs(q);
 
-        if (error) throw error;
-        return data as SellOrder[];
+        return snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+        })) as SellOrder[];
     } catch (error) {
-        console.error("getUserSellOrders failed:", error);
+        console.error("getUserSellOrders Firestore failed:", error);
         return [];
     }
 };
@@ -353,9 +334,8 @@ export const updateSellOrderStatus = async (
     paymentStatus?: PaymentStatus,
     adminNotes?: string
 ): Promise<void> => {
-    const supabase = createClient();
-
     try {
+        const orderRef = doc(db, "sell_orders", orderId);
         const updates: any = {
             status,
             updated_at: new Date().toISOString()
@@ -364,21 +344,13 @@ export const updateSellOrderStatus = async (
         if (paymentStatus) updates.payment_status = paymentStatus;
         if (adminNotes) updates.admin_notes = adminNotes;
 
-        const { error } = await supabase
-            .from('sell_orders')
-            .update(updates)
-            .eq('id', orderId);
-
-        if (error) throw error;
+        await updateDoc(orderRef, updates);
 
         // Fetch order for additional logic
-        const { data: order } = await supabase
-            .from('sell_orders')
-            .select('*')
-            .eq('id', orderId)
-            .single();
+        const orderSnap = await safeGetDoc(orderRef);
 
-        if (order) {
+        if (orderSnap.exists()) {
+            const order = orderSnap.data();
             // Handle payment completion - add credits to wallet if needed
             if (paymentStatus === 'completed' && order.payment_method === 'credits') {
                 try {
@@ -424,7 +396,7 @@ export const updateSellOrderStatus = async (
             }
         }
     } catch (error) {
-        console.error("updateSellOrderStatus failed:", error);
+        console.error("updateSellOrderStatus Firestore failed:", error);
     }
 };
 

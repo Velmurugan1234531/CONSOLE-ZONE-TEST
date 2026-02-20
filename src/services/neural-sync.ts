@@ -1,6 +1,10 @@
-
-import { createClient } from "@/lib/supabase/client";
-import { SupabaseClient } from "@supabase/supabase-js";
+import { db } from "@/lib/firebase";
+import {
+    doc,
+    updateDoc,
+    getDoc
+} from "firebase/firestore";
+import { safeGetDoc } from "@/utils/firebase-utils";
 
 export type NeuralTier = {
     name: string;
@@ -31,19 +35,14 @@ export const NEURAL_TIERS: NeuralTier[] = [
 ];
 
 export const NeuralSyncService = {
-    getUserXP: async (userId: string, supabaseClient?: SupabaseClient): Promise<number> => {
-        const supabase = supabaseClient || createClient();
+    getUserXP: async (userId: string): Promise<number> => {
         try {
-            const { data, error } = await supabase
-                .from('users')
-                .select('neural_sync_xp')
-                .eq('id', userId)
-                .single();
-
-            if (error || !data) {
+            const userSnap = await safeGetDoc(doc(db, "users", userId));
+            if (!userSnap.exists()) {
                 return 0;
             }
 
+            const data = userSnap.data();
             return data.neural_sync_xp || 0;
         } catch (error) {
             console.error("Error fetching XP, defaulting to 0:", error);
@@ -65,19 +64,16 @@ export const NeuralSyncService = {
         };
     },
 
-    addXP: async (userId: string, amount: number, supabaseClient?: SupabaseClient) => {
-        const supabase = supabaseClient || createClient();
-
+    addXP: async (userId: string, amount: number) => {
         try {
-            const currentXp = await NeuralSyncService.getUserXP(userId, supabase);
+            const currentXp = await NeuralSyncService.getUserXP(userId);
             const newXp = currentXp + amount;
 
-            const { error } = await supabase
-                .from('users')
-                .update({ neural_sync_xp: newXp })
-                .eq('id', userId);
-
-            if (error) throw error;
+            const userRef = doc(db, "users", userId);
+            await updateDoc(userRef, {
+                neural_sync_xp: newXp,
+                updated_at: new Date().toISOString()
+            });
 
             return newXp;
         } catch (error) {

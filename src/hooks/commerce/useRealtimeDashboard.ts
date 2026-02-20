@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import { collection, query, onSnapshot, Unsubscribe } from "firebase/firestore";
 
 export interface DashboardMetrics {
     totalOrders: number;
@@ -20,20 +21,12 @@ export function useRealtimeDashboard() {
         liveProcessing: 0
     });
     const [loading, setLoading] = useState(true);
-    const supabase = createClient();
 
     useEffect(() => {
-        const fetchMetrics = async () => {
-            const { data, error } = await supabase
-                .from('orders') // Assuming 'orders' table exists
-                .select('*');
+        const ordersRef = collection(db, "orders");
+        const q = query(ordersRef);
 
-            if (error) {
-                console.error("Dashboard Listener Error:", error);
-                setLoading(false);
-                return;
-            }
-
+        const unsubscribe = onSnapshot(q, (snapshot) => {
             let total = 0;
             let processing = 0;
             let failures = 0;
@@ -44,8 +37,12 @@ export function useRealtimeDashboard() {
             todayStart.setHours(0, 0, 0, 0);
             const todayTimestamp = todayStart.getTime();
 
-            data.forEach((order: any) => {
-                const createdAt = new Date(order.created_at).getTime();
+            snapshot.forEach((doc) => {
+                const order = doc.data();
+                // Firestore timestamps might be strings or Timestamp objects depending on how they were saved
+                const createdAt = typeof order.created_at === 'string'
+                    ? new Date(order.created_at).getTime()
+                    : order.created_at?.toDate?.()?.getTime() || 0;
 
                 // Total Orders Today
                 if (createdAt > todayTimestamp) {
@@ -77,21 +74,13 @@ export function useRealtimeDashboard() {
                 liveProcessing: processing
             });
             setLoading(false);
-        };
-
-        fetchMetrics();
-
-        const channel = supabase
-            .channel('dashboard-metrics')
-            .on(
-                'postgres_changes',
-                { event: '*', schema: 'public', table: 'orders' },
-                () => fetchMetrics()
-            )
-            .subscribe();
+        }, (error) => {
+            console.error("Dashboard Listener Error:", error);
+            setLoading(false);
+        });
 
         return () => {
-            supabase.removeChannel(channel);
+            unsubscribe();
         };
     }, []);
 

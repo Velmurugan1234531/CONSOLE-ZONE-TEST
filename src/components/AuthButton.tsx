@@ -1,6 +1,7 @@
 "use client";
 
-import { createClient } from "@/lib/supabase/client";
+import { auth } from "@/lib/firebase";
+import { onAuthStateChanged, signOut, User as FirebaseUser } from "firebase/auth";
 import { Loader2, LogIn, User, LogOut } from "lucide-react";
 import { useEffect, useState } from "react";
 import Link from "next/link";
@@ -8,40 +9,28 @@ import { useRouter } from "next/navigation";
 
 export default function AuthButton() {
     const [loading, setLoading] = useState(true);
-    const [user, setUser] = useState<any>(null);
-    const supabase = createClient();
+    const [user, setUser] = useState<FirebaseUser | null>(null);
     const router = useRouter();
 
     useEffect(() => {
-        const fetchUser = async () => {
-            const { data: { session } } = await supabase.auth.getSession();
-            if (session?.user) {
-                setUser(session.user);
-            } else {
-                setUser(null);
-            }
+        const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+            setUser(currentUser);
             setLoading(false);
-        };
-
-        fetchUser();
-
-        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-            if (session?.user) {
-                setUser(session.user);
-            } else {
-                setUser(null);
-            }
         });
 
-        return () => subscription.unsubscribe();
-    }, [supabase]);
+        return () => unsubscribe();
+    }, []);
 
     const handleSignOut = async () => {
-        await supabase.auth.signOut();
-        setUser(null);
-        router.refresh();
-        // Redirect to login page
-        window.location.href = '/login';
+        try {
+            await signOut(auth);
+            setUser(null);
+            router.refresh();
+            // Redirect to login page
+            window.location.href = '/login';
+        } catch (error) {
+            console.error("Sign out error:", error);
+        }
     };
 
     if (loading) {
@@ -60,8 +49,8 @@ export default function AuthButton() {
                     className="w-10 h-10 rounded-full border border-white/10 bg-white/5 overflow-hidden relative group hover:border-[#A855F7] transition-all flex items-center justify-center"
                     title="Client Profile"
                 >
-                    {user.user_metadata?.avatar_url ? (
-                        <img src={user.user_metadata.avatar_url} alt="Profile" className="w-full h-full object-cover" />
+                    {user.photoURL ? (
+                        <img src={user.photoURL} alt="Profile" className="w-full h-full object-cover" />
                     ) : (
                         <User size={18} className="text-gray-400 group-hover:text-[#A855F7] transition-colors" />
                     )}

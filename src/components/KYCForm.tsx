@@ -1,8 +1,9 @@
-
 "use client";
 
 import { useState, useEffect } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { auth, storage, db } from "@/lib/firebase";
+import { onAuthStateChanged, User as FirebaseUser } from "firebase/auth";
+import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { motion, AnimatePresence } from "framer-motion";
 import {
     User, Phone, Fingerprint, MapPin, Loader2, CheckCircle2,
@@ -12,6 +13,7 @@ import { useRouter } from "next/navigation";
 import { createWorker } from 'tesseract.js';
 import dynamic from 'next/dynamic';
 import ScanningOverlay from "./kyc/ScanningOverlay";
+
 const LocationPicker = dynamic(() => import("./common/LocationPicker"), {
     ssr: false,
     loading: () => (
@@ -20,7 +22,6 @@ const LocationPicker = dynamic(() => import("./common/LocationPicker"), {
         </div>
     )
 });
-
 
 interface KYCFormProps {
     onSuccess?: () => void;
@@ -35,6 +36,7 @@ export default function KYCForm({ onSuccess, className }: KYCFormProps) {
     const [uploading, setUploading] = useState(false);
     const [isScanning, setIsScanning] = useState(false);
     const [scanStatus, setScanStatus] = useState("Initializing Scanner...");
+    const [user, setUser] = useState<FirebaseUser | null>(null);
 
     // Form Stats
     const [fullName, setFullName] = useState("");
@@ -49,32 +51,28 @@ export default function KYCForm({ onSuccess, className }: KYCFormProps) {
     const [selectedLng, setSelectedLng] = useState<number | null>(null);
 
     const router = useRouter();
-    const supabase = createClient();
+
+    useEffect(() => {
+        const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+            setUser(currentUser);
+        });
+        return () => unsubscribe();
+    }, []);
 
     const uploadFile = async (file: File, path: string) => {
-        const fileExt = file.name.split('.').pop();
-        const fileName = `${Math.random()}.${fileExt}`;
-        const filePath = `${path}/${fileName}`;
+        try {
+            const fileExt = file.name.split('.').pop();
+            const fileName = `${Math.random().toString(36).substring(2)}.${fileExt}`;
+            const fullPath = `kyc-documents/${path}/${fileName}`;
+            const storageRef = ref(storage, fullPath);
 
-        // Demo Mode Bypass
-        if (path.includes('demo-user')) {
-            return "https://images.unsplash.com/photo-1549923746-c502d488b3ea?q=80&w=300";
-        }
-
-        const { data, error } = await supabase.storage
-            .from('kyc-documents')
-            .upload(filePath, file);
-
-        if (error) {
-            console.error("Upload failed:", error);
+            await uploadBytes(storageRef, file);
+            const downloadUrl = await getDownloadURL(storageRef);
+            return downloadUrl;
+        } catch (error: any) {
+            console.error("Firebase Storage upload failed:", error);
             throw new Error(`Upload failed: ${error.message}`);
         }
-
-        const { data: publicData } = supabase.storage
-            .from('kyc-documents')
-            .getPublicUrl(filePath);
-
-        return publicData.publicUrl;
     };
 
     const detectLocation = () => {
@@ -117,13 +115,11 @@ export default function KYCForm({ onSuccess, className }: KYCFormProps) {
             setScanStatus("Extracting Bio-Data...");
             console.log("OCR Result:", text);
 
-            // Simple pattern matching for Indian Aadhar (XXXX XXXX XXXX or XXXXXXXXXXXX)
             const aadharMatch = text.match(/\b\d{4}\s\d{4}\s\d{4}\b/) || text.match(/\b\d{12}\b/);
             if (aadharMatch) {
                 setAadharNumber(aadharMatch[0]);
             }
 
-            // Simple name extraction attempt
             const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 5);
             const nameLine = lines.find(l =>
                 !l.toLowerCase().includes('india') &&
@@ -170,49 +166,35 @@ export default function KYCForm({ onSuccess, className }: KYCFormProps) {
         setUploading(true);
 
         try {
-            let userId = "";
-            const { data: { user } } = await supabase.auth.getUser();
-
-            if (user) {
-                userId = user.id;
-            } else {
-                const demoUser = localStorage.getItem('DEMO_USER_SESSION');
-                if (demoUser) {
-                    userId = JSON.parse(demoUser).id;
-                } else {
-                    alert("Please log in to submit KYC.");
-                    router.push('/login');
-                    return;
-                }
+            if (!user) {
+                alert("Please log in to submit KYC.");
+                router.push('/login');
+                return;
             }
 
-            // Upload Files
+            const userId = user.uid;
+
+            // Upload Files to Firebase Storage
             const idFrontUrl = await uploadFile(idFrontFile, `${userId}/id_card_front`);
             const idBackUrl = await uploadFile(idBackFile, `${userId}/id_card_back`);
             const selfieUrl = await uploadFile(selfieFile, `${userId}/selfie`);
 
-            // Submit Data
+            // Submit Data to Firestore
             const { submitKYC } = await import("@/services/admin");
 
-            // Handle Demo Submission differently if needed or just pass through
-            if (userId.startsWith('demo-')) {
-                // Demo submission simulation
-                await new Promise(resolve => setTimeout(resolve, 1500));
-            } else {
-                await submitKYC(userId, {
-                    fullName,
-                    phone,
-                    secondaryPhone,
-                    aadharNumber,
-                    address,
-                    secondaryAddress: "", // Future field
-                    locationLat: selectedLat || undefined,
-                    locationLng: selectedLng || undefined,
-                    idCardFrontUrl: idFrontUrl,
-                    idCardBackUrl: idBackUrl,
-                    selfieUrl
-                });
-            }
+            await submitKYC(userId, {
+                fullName,
+                phone,
+                secondaryPhone,
+                aadharNumber,
+                address,
+                secondaryAddress: "",
+                locationLat: selectedLat || undefined,
+                locationLng: selectedLng || undefined,
+                idCardFrontUrl: idFrontUrl,
+                idCardBackUrl: idBackUrl,
+                selfieUrl
+            });
 
             if (onSuccess) {
                 onSuccess();
@@ -228,7 +210,6 @@ export default function KYCForm({ onSuccess, className }: KYCFormProps) {
             setUploading(false);
         }
     };
-
     return (
         <div className={`text-white relative ${className}`}>
             {/* AI Scanning Overlay */}

@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { auth, storage } from "@/lib/firebase";
+import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -34,24 +35,15 @@ export default function KYCPage() {
 
     const router = useRouter();
     const { settings } = useVisuals();
-    const supabase = createClient();
 
     const uploadFile = async (file: File, path: string) => {
         const fileExt = file.name.split('.').pop();
         const fileName = `${Math.random().toString(36).substring(2)}_${Date.now()}.${fileExt}`;
         const filePath = `kyc-documents/${path}/${fileName}`;
+        const storageRef = ref(storage, filePath);
 
-        const { data, error } = await supabase.storage
-            .from('media') // Assuming 'media' bucket exists
-            .upload(filePath, file);
-
-        if (error) throw error;
-
-        const { data: { publicUrl } } = supabase.storage
-            .from('media')
-            .getPublicUrl(filePath);
-
-        return publicUrl;
+        await uploadBytes(storageRef, file);
+        return await getDownloadURL(storageRef);
     };
 
     const detectLocation = () => {
@@ -103,8 +95,7 @@ export default function KYCPage() {
         setUploading(true);
 
         try {
-            const { data: { session } } = await supabase.auth.getSession();
-            const user = session?.user;
+            const user = auth.currentUser;
 
             if (!user) {
                 // Check Demo Session
@@ -138,13 +129,13 @@ export default function KYCPage() {
             }
 
             // Upload Files
-            const idUrl = await uploadFile(idFile, `${user.id}/id_card_front`);
-            const idBackUrl = idBackFile ? await uploadFile(idBackFile, `${user.id}/id_card_back`) : undefined;
-            const selfieUrl = await uploadFile(selfieFile, `${user.id}/selfie`);
+            const idUrl = await uploadFile(idFile, `${user.uid}/id_card_front`);
+            const idBackUrl = idBackFile ? await uploadFile(idBackFile, `${user.uid}/id_card_back`) : undefined;
+            const selfieUrl = await uploadFile(selfieFile, `${user.uid}/selfie`);
 
             // Submit Data
             const { submitKYC } = await import("@/services/admin");
-            await submitKYC(user.id, {
+            await submitKYC(user.uid, {
                 fullName,
                 phone,
                 secondaryPhone,

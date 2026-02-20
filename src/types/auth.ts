@@ -45,9 +45,9 @@ export interface UserDocument {
     lastLoginIP: string;
     createdBy?: string; // UID of creator (for auditing)
     metadata: UserSecurityMetadata;
-    full_name?: string;
+    fullName?: string;
     phone?: string;
-    avatar_url?: string;
+    avatarUrl?: string;
 }
 
 /**

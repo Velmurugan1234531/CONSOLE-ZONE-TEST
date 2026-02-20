@@ -1,4 +1,18 @@
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    query,
+    where,
+    orderBy,
+    getDocs,
+    getDoc,
+    doc,
+    addDoc,
+    updateDoc,
+    deleteDoc,
+    increment
+} from "firebase/firestore";
+import { safeGetDocs, safeGetDoc } from "@/utils/firebase-utils";
 
 export interface PromotionalOffer {
     id: string;
@@ -22,6 +36,8 @@ export interface OfferValidationResult {
     discount_value: number | null;
     message: string;
 }
+
+const COLLECTION = 'promotional_offers';
 
 // DEMO DATA for testing/fallback
 const DEMO_OFFERS: PromotionalOffer[] = [
@@ -73,36 +89,45 @@ const DEMO_OFFERS: PromotionalOffer[] = [
 ];
 
 export const getAllOffers = async (): Promise<PromotionalOffer[]> => {
-    const supabase = createClient();
     try {
-        const { data, error } = await supabase
-            .from('promotional_offers')
-            .select('*')
-            .order('valid_from', { ascending: false });
+        const offersRef = collection(db, COLLECTION);
+        const q = query(offersRef, orderBy('valid_from', 'desc'));
+        const snapshot = await safeGetDocs(q);
 
-        if (error || !data || data.length === 0) {
+        if (snapshot.empty) {
             return DEMO_OFFERS;
         }
 
-        return data as PromotionalOffer[];
+        return snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+        })) as PromotionalOffer[];
     } catch (e) {
-        console.warn("Offers fetch failed (using demo fallback):", e);
+        console.warn("Firestore offers fetch failed (using demo fallback):", e);
         return DEMO_OFFERS;
     }
 };
 
 export const getActiveOffers = async (): Promise<PromotionalOffer[]> => {
-    const supabase = createClient();
     try {
         const now = new Date().toISOString();
-        const { data, error } = await supabase
-            .from('promotional_offers')
-            .select('*')
-            .eq('is_active', true)
-            .lte('valid_from', now)
-            .or(`valid_until.is.null,valid_until.gte.${now}`);
+        const offersRef = collection(db, COLLECTION);
+        // Firestore doesn't support OR queries across different fields easily with complex filters
+        // Fetch active ones and filter by date client-side for simplicity/resilience
+        const q = query(offersRef, where('is_active', '==', true));
+        const snapshot = await safeGetDocs(q);
 
-        if (error || !data) {
+        const offers = snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+        })) as PromotionalOffer[];
+
+        const activeOffers = offers.filter(offer =>
+            new Date(offer.valid_from) <= new Date() &&
+            (!offer.valid_until || new Date(offer.valid_until) >= new Date())
+        );
+
+        if (activeOffers.length === 0) {
             return DEMO_OFFERS.filter(offer =>
                 offer.is_active &&
                 new Date(offer.valid_from) <= new Date() &&
@@ -110,7 +135,7 @@ export const getActiveOffers = async (): Promise<PromotionalOffer[]> => {
             );
         }
 
-        return data as PromotionalOffer[];
+        return activeOffers;
     } catch (e) {
         return DEMO_OFFERS;
     }
@@ -122,20 +147,18 @@ export const validateOfferCode = async (
     rentalDays: number
 ): Promise<OfferValidationResult> => {
     let offer: PromotionalOffer | undefined;
-    const supabase = createClient();
 
     try {
-        const { data, error } = await supabase
-            .from('promotional_offers')
-            .select('*')
-            .eq('code', code)
-            .single();
+        const offersRef = collection(db, COLLECTION);
+        const q = query(offersRef, where('code', '==', code.toUpperCase()));
+        const snapshot = await safeGetDocs(q);
 
-        if (data) {
-            offer = data as PromotionalOffer;
+        if (!snapshot.empty) {
+            const docSnap = snapshot.docs[0];
+            offer = { id: docSnap.id, ...docSnap.data() } as PromotionalOffer;
         }
     } catch (e) {
-        console.error("Error fetching offer for validation:", e);
+        console.error("Error fetching offer for validation (Firestore):", e);
     }
 
     if (!offer) {
@@ -209,72 +232,62 @@ export const validateOfferCode = async (
 };
 
 export const createOffer = async (offerData: Omit<PromotionalOffer, 'id' | 'current_uses'>): Promise<PromotionalOffer | null> => {
-    const supabase = createClient();
     try {
-        const newOffer = { ...offerData, current_uses: 0, created_at: new Date().toISOString() };
-        const { data, error } = await supabase
-            .from('promotional_offers')
-            .insert(newOffer)
-            .select()
-            .single();
+        const newOffer = {
+            ...offerData,
+            code: offerData.code.toUpperCase(),
+            current_uses: 0,
+            created_at: new Date().toISOString()
+        };
+        const docRef = await addDoc(collection(db, COLLECTION), newOffer);
+        const snapshot = await getDoc(docRef);
 
-        if (error) {
-            console.error(`Error creating offer: ${error.message}`);
-            return null; // Should handle error better in UI
-        }
-        return data as PromotionalOffer;
+        return { id: snapshot.id, ...snapshot.data() } as PromotionalOffer;
     } catch (error: any) {
-        console.error(`Error creating offer: ${error.message || error}`);
+        console.error(`Error creating offer (Firestore): ${error.message || error}`);
         throw error;
     }
 };
 
 export const updateOffer = async (id: string, updates: Partial<PromotionalOffer>): Promise<PromotionalOffer | null> => {
-    const supabase = createClient();
     try {
-        const { data, error } = await supabase
-            .from('promotional_offers')
-            .update(updates)
-            .eq('id', id)
-            .select()
-            .single();
+        const docRef = doc(db, COLLECTION, id);
+        const finalUpdates = { ...updates };
+        if (updates.code) finalUpdates.code = updates.code.toUpperCase();
 
-        if (error) throw error;
-        return data as PromotionalOffer;
+        await updateDoc(docRef, finalUpdates);
+        const snapshot = await getDoc(docRef);
+        return { id: snapshot.id, ...snapshot.data() } as PromotionalOffer;
     } catch (error: any) {
-        console.error(`Error updating offer: ${error.message || error}`);
+        console.error(`Error updating offer (Firestore): ${error.message || error}`);
         throw error;
     }
 };
 
 export const deleteOffer = async (id: string): Promise<boolean> => {
-    const supabase = createClient();
     try {
-        const { error } = await supabase
-            .from('promotional_offers')
-            .delete()
-            .eq('id', id);
-
-        if (error) throw error;
+        await deleteDoc(doc(db, COLLECTION, id));
         return true;
     } catch (error: any) {
-        console.error(`Error deleting offer: ${error.message || error}`);
+        console.error(`Error deleting offer (Firestore): ${error.message || error}`);
         throw error;
     }
 };
 
 export const incrementOfferUsage = async (code: string): Promise<void> => {
-    const supabase = createClient();
     try {
-        // Supabase doesn't have a direct 'increment' in client like Firebase
-        // We'd typically use an RPC, but for now specific read-update or just rely on backend triggers?
-        // Let's do simple read-update for now (optimistic concurrency issues ignored for MVP)
-        const { data: offer } = await supabase.from('promotional_offers').select('id, current_uses').eq('code', code).single();
-        if (offer) {
-            await supabase.from('promotional_offers').update({ current_uses: offer.current_uses + 1 }).eq('id', offer.id);
+        const offersRef = collection(db, COLLECTION);
+        const q = query(offersRef, where('code', '==', code.toUpperCase()));
+        const snapshot = await safeGetDocs(q);
+
+        if (!snapshot.empty) {
+            const docRef = doc(db, COLLECTION, snapshot.docs[0].id);
+            await updateDoc(docRef, {
+                current_uses: increment(1)
+            });
         }
     } catch (error: any) {
-        console.error(`Error incrementing offer usage: ${error.message || error}`);
+        console.error(`Error incrementing offer usage (Firestore): ${error.message || error}`);
     }
 };
 

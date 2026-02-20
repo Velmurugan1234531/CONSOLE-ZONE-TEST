@@ -1,6 +1,11 @@
-
 import { useEffect, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    onSnapshot,
+    query,
+    orderBy
+} from "firebase/firestore";
 
 export interface TrackingData {
     bookingId: string;
@@ -13,70 +18,31 @@ export interface TrackingData {
 export function useRealtimeTracking() {
     const [activeFleet, setActiveFleet] = useState<TrackingData[]>([]);
     const [loading, setLoading] = useState(true);
-    const supabase = createClient();
 
     useEffect(() => {
-        const fetchInitialState = async () => {
-            const { data, error } = await supabase
-                .from('tracking')
-                .select('*');
+        const trackingRef = collection(db, 'tracking');
+        const q = query(trackingRef);
 
-            if (data) {
-                // Map DB columns to interface if needed, assuming camelCase in DB or mapper
-                // But typically Supabase uses snake_case. 
-                // Let's assume the table has snake_case columns and we map them.
-                const formattedData = data.map((item: any) => ({
-                    bookingId: item.booking_id,
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const formattedData = snapshot.docs.map((doc) => {
+                const item = doc.data();
+                return {
+                    bookingId: item.booking_id || doc.id,
                     customerLocation: item.customer_location,
                     riderLocation: item.rider_location,
                     status: item.status,
-                    updatedAt: item.updated_at
-                }));
-                setActiveFleet(formattedData);
-            }
+                    updatedAt: item.updated_at || new Date().toISOString()
+                };
+            });
+            setActiveFleet(formattedData);
             setLoading(false);
-        };
+        }, (error) => {
+            console.error("useRealtimeTracking Firestore error:", error);
+            setLoading(false);
+        });
 
-        fetchInitialState();
-
-        const channel = supabase
-            .channel('tracking-updates')
-            .on(
-                'postgres_changes',
-                {
-                    event: '*',
-                    schema: 'public',
-                    table: 'tracking'
-                },
-                (payload) => {
-                    if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-                        const newItem = payload.new as any;
-                        const formattedItem = {
-                            bookingId: newItem.booking_id,
-                            customerLocation: newItem.customer_location,
-                            riderLocation: newItem.rider_location,
-                            status: newItem.status,
-                            updatedAt: newItem.updated_at
-                        };
-
-                        setActiveFleet((prev) => {
-                            const exists = prev.find(p => p.bookingId === formattedItem.bookingId);
-                            if (exists) {
-                                return prev.map(p => p.bookingId === formattedItem.bookingId ? formattedItem : p);
-                            } else {
-                                return [...prev, formattedItem];
-                            }
-                        });
-                    }
-                }
-            )
-            .subscribe();
-
-        return () => {
-            supabase.removeChannel(channel);
-        };
+        return () => unsubscribe();
     }, []);
 
     return { activeFleet, loading };
 }
-

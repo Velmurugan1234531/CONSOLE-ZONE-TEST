@@ -1,8 +1,8 @@
-
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAnalytics, isSupported } from "firebase/analytics";
 import { getAuth } from "firebase/auth";
 import { getFirestore, initializeFirestore } from "firebase/firestore";
+import { getStorage } from "firebase/storage";
 
 const firebaseConfig = {
     apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY || 'AIza-placeholder-key',
@@ -32,24 +32,28 @@ try {
     auth = { onAuthStateChanged: () => () => { } } as any;
 }
 
-// Initialize Firestore with default settings (WebSockets preferred)
-// Using try-catch to handle HMR or multiple initializations safely
+// Initialize Firestore
 let db: ReturnType<typeof getFirestore>;
 try {
     db = getFirestore(app);
 } catch (e) {
-    db = initializeFirestore(app, {
-        // experimentalForceLongPolling: true, // Commented out to test standard connection
-    });
+    db = initializeFirestore(app, {});
 }
 
-// Troubleshooting: Log config to ensure env vars are loaded (masking sensitive data)
+// Initialize Storage
+let storage: any;
+try {
+    storage = getStorage(app);
+} catch (e) {
+    console.warn("⚠️ Firebase Storage failed to initialize.");
+    storage = {} as any;
+}
+
+// Troubleshooting logs
 if (typeof window !== 'undefined') {
-    console.log("🔥 Firebase Config Loaded:", {
+    console.log("🔥 Firebase Services Initialized:", {
         projectId: firebaseConfig.projectId,
-        authDomain: firebaseConfig.authDomain,
         storageBucket: firebaseConfig.storageBucket,
-        mode: "Long Polling Forced"
     });
 }
 
@@ -62,4 +66,4 @@ if (typeof window !== 'undefined') {
     });
 }
 
-export { app, auth, db, analytics };
+export { app, auth, db, storage, analytics };

@@ -1,4 +1,16 @@
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    query,
+    where,
+    orderBy,
+    doc,
+    getDoc,
+    updateDoc,
+    addDoc,
+    setDoc
+} from "firebase/firestore";
+import { safeGetDocs, safeGetDoc } from "@/utils/firebase-utils";
 
 export interface SellPricing {
     id: string;
@@ -31,22 +43,24 @@ export const calculateCashPrice = (creditPrice: number): number => {
  * Get sell pricing for a specific product
  */
 export const getSellPricing = async (productId: string): Promise<SellPricing | null> => {
-    const supabase = createClient();
-
     try {
-        const { data, error } = await supabase
-            .from('sell_pricing')
-            .select('*')
-            .eq('product_id', productId)
-            .eq('is_active', true)
-            .single(); // Assuming one active price per product
+        const pricingRef = collection(db, "sell_pricing");
+        const q = query(
+            pricingRef,
+            where("product_id", "==", productId),
+            where("is_active", "==", true)
+        );
 
-        if (error || !data) {
-            // Try to find ANY match if single failed (maybe multiple active?) - for now fallback
+        const snapshot = await safeGetDocs(q);
+        if (snapshot.empty) {
             return null;
         }
 
-        const pricingData = data as SellPricing;
+        const pricingDoc = snapshot.docs[0];
+        const pricingData = {
+            id: pricingDoc.id,
+            ...pricingDoc.data()
+        } as SellPricing;
 
         // Phase 11: Apply Global Market Multiplier
         try {
@@ -67,7 +81,7 @@ export const getSellPricing = async (productId: string): Promise<SellPricing | n
 
         return pricingData;
     } catch (e) {
-        console.warn("Sell Pricing fetch failed", e);
+        console.warn("Sell Pricing fetch failed (Firestore):", e);
         return null;
     }
 };
@@ -76,25 +90,25 @@ export const getSellPricing = async (productId: string): Promise<SellPricing | n
  * Get all sell pricing configurations
  */
 export const getAllSellPricing = async (): Promise<SellPricing[]> => {
-    const supabase = createClient();
-
     try {
-        const { data, error } = await supabase
-            .from('sell_pricing')
-            .select('*')
-            .eq('is_active', true)
-            .order('product_name', { ascending: true });
+        const pricingRef = collection(db, "sell_pricing");
+        const q = query(
+            pricingRef,
+            where("is_active", "==", true),
+            orderBy("product_name", "asc")
+        );
 
-        if (error) {
-            console.warn("Sell pricing fetch failed, using demo data", error);
+        const snapshot = await safeGetDocs(q);
+        if (snapshot.empty) {
             return getDemoSellPricing();
         }
 
-        if (data.length === 0) return getDemoSellPricing();
-
-        return data as SellPricing[];
+        return snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+        })) as SellPricing[];
     } catch (error) {
-        console.warn("Sell pricing fetch failed, using demo data", error);
+        console.warn("Sell pricing fetch failed (Firestore), using demo data", error);
         return getDemoSellPricing();
     }
 };
@@ -107,8 +121,6 @@ export const updateSellPricing = async (
     cashPrice: number,
     creditPrice?: number
 ): Promise<SellPricing | null> => {
-    const supabase = createClient();
-
     const finalCreditPrice = creditPrice || calculateCreditPrice(cashPrice);
 
     const pricingUpdate = {
@@ -117,22 +129,30 @@ export const updateSellPricing = async (
         updated_at: new Date().toISOString()
     };
 
-    // Find document by product_id
-    // In Supabase we can update directly by product_id if unique, but let's query first to get ID or just update where product_id matches
+    try {
+        const pricingRef = collection(db, "sell_pricing");
+        const q = query(
+            pricingRef,
+            where("product_id", "==", productId),
+            where("is_active", "==", true)
+        );
 
-    // Better: Update where product_id == productId AND is_active == true (or just product_id if there's only one)
-    // The previous logic found the first one.
+        const snapshot = await safeGetDocs(q);
+        if (snapshot.empty) {
+            throw new Error("Pricing record not found for update");
+        }
 
-    const { data, error } = await supabase
-        .from('sell_pricing')
-        .update(pricingUpdate)
-        .eq('product_id', productId)
-        .select()
-        .single();
+        const docRef = doc(db, "sell_pricing", snapshot.docs[0].id);
+        await updateDoc(docRef, pricingUpdate);
 
-    if (error) throw new Error(`Supabase update failed: ${error.message}`);
-
-    return data as SellPricing;
+        return {
+            id: snapshot.docs[0].id,
+            ...snapshot.docs[0].data(),
+            ...pricingUpdate
+        } as SellPricing;
+    } catch (error: any) {
+        throw new Error(`Firestore update failed: ${error.message}`);
+    }
 };
 
 /**
@@ -144,8 +164,6 @@ export const createSellPricing = async (
     cashPrice: number,
     creditPrice?: number
 ): Promise<SellPricing> => {
-    const supabase = createClient();
-
     const finalCreditPrice = creditPrice || calculateCreditPrice(cashPrice);
 
     const pricing = {
@@ -157,29 +175,37 @@ export const createSellPricing = async (
         updated_at: new Date().toISOString()
     };
 
-    const { data, error } = await supabase
-        .from('sell_pricing')
-        .insert(pricing)
-        .select()
-        .single();
-
-    if (error) throw new Error(`Supabase insert failed: ${error.message}`);
-
-    return data as SellPricing;
+    try {
+        const docRef = await addDoc(collection(db, "sell_pricing"), pricing);
+        return {
+            id: docRef.id,
+            ...pricing
+        } as SellPricing;
+    } catch (error: any) {
+        throw new Error(`Firestore insert failed: ${error.message}`);
+    }
 };
 
 /**
  * Delete/deactivate sell pricing (Admin function)
  */
 export const deleteSellPricing = async (productId: string): Promise<void> => {
-    const supabase = createClient();
+    try {
+        const pricingRef = collection(db, "sell_pricing");
+        const q = query(
+            pricingRef,
+            where("product_id", "==", productId),
+            where("is_active", "==", true)
+        );
 
-    const { error } = await supabase
-        .from('sell_pricing')
-        .update({ is_active: false })
-        .eq('product_id', productId);
+        const snapshot = await safeGetDocs(q);
+        if (snapshot.empty) return;
 
-    if (error) throw new Error(`Supabase delete (soft) failed: ${error.message}`);
+        const docRef = doc(db, "sell_pricing", snapshot.docs[0].id);
+        await updateDoc(docRef, { is_active: false });
+    } catch (error: any) {
+        throw new Error(`Firestore delete (soft) failed: ${error.message}`);
+    }
 };
 
 /**

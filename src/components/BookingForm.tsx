@@ -16,8 +16,7 @@ import { DateRange } from "react-day-picker";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 
-import { createClient } from "@/lib/supabase/client";
-
+import { useAuth } from "@/context/AuthContext";
 
 function cn(...inputs: ClassValue[]) {
     return twMerge(clsx(inputs));
@@ -51,7 +50,7 @@ import { getCatalogSettings, calculateRentalPrice, CatalogSettings } from '@/ser
 
 export default function BookingForm({ product, initialPlan = 'DAILY' }: BookingFormProps) {
     const router = useRouter();
-    const supabase = createClient();
+    const { user, userDocument, loading: authLoading } = useAuth();
 
     // Connected to Real-time stock
     const stockList = StockService.useStock();
@@ -60,21 +59,18 @@ export default function BookingForm({ product, initialPlan = 'DAILY' }: BookingF
     const controllerSettings = getControllerSettings();
     const [catalogSettings, setCatalogSettings] = useState<CatalogSettings[]>([]);
 
-    // Map list to Record format for existing logic compatibility
-    // ONLY show consoles that belong to ENABLED catalog categories
+    // ... (stockData logic preserved)
     const stockData = stockList.reduce((acc, item) => {
-        // Find if this item belongs to an enabled category
         const itemCategory = item.id.toLowerCase().includes('ps5') ? 'PS5'
             : item.id.toLowerCase().includes('ps4') ? 'PS4'
                 : item.id.toLowerCase().includes('xbox') ? 'Xbox'
                     : 'PS5';
 
-        // Normalize for matching: compare case-insensitive without spaces
         const normalizedItemCategory = (item.label || item.name || '').toLowerCase().replace(/\s+/g, '');
         const isEnabled = catalogSettings.length === 0 ||
             catalogSettings.find(s =>
                 s.device_category.toLowerCase().replace(/\s+/g, '') === normalizedItemCategory
-            )?.is_enabled !== false; // Show if not explicitly disabled
+            )?.is_enabled !== false;
 
         if (isEnabled) {
             acc[item.id] = {
@@ -91,7 +87,7 @@ export default function BookingForm({ product, initialPlan = 'DAILY' }: BookingF
     const [kycStatus, setKycStatus] = useState<string | null>(null);
     const [date, setDate] = useState<DateRange | undefined>({
         from: new Date(),
-        to: new Date(new Date().getTime() + 24 * 60 * 60 * 1000 * 2), // 2 days default
+        to: new Date(new Date().getTime() + 24 * 60 * 60 * 1000 * 2),
     });
     const [formData, setFormData] = useState({
         firstName: "",
@@ -101,24 +97,19 @@ export default function BookingForm({ product, initialPlan = 'DAILY' }: BookingF
         pickupTime: "",
         address: "",
         guests: "1",
-        selectedConsole: "ps5", // Default
-        deliveryMode: "delivery" // 'delivery' | 'pickup'
+        selectedConsole: "ps5",
+        deliveryMode: "delivery"
     });
-
 
     const [isSubmitted, setIsSubmitted] = useState(false);
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [isLocating, setIsLocating] = useState(false);
     const [step, setStep] = useState(1);
     const [isConsoleListOpen, setIsConsoleListOpen] = useState(false);
-    const [user, setUser] = useState<any>(null);
     const [offerCode, setOfferCode] = useState("");
     const [appliedOffer, setAppliedOffer] = useState<any>(null);
     const [promoStatus, setPromoStatus] = useState<{ message: string; type: 'success' | 'error' | null }>({ message: '', type: null });
     const [validationError, setValidationError] = useState<string | null>(null);
-
-
-
 
     // Load catalog settings on mount
     useEffect(() => {
@@ -133,100 +124,31 @@ export default function BookingForm({ product, initialPlan = 'DAILY' }: BookingF
         loadCatalog();
     }, []);
 
-    // Track Auth State with Supabase
+    // Track Auth State with Context
     useEffect(() => {
-        const checkUser = async () => {
-            const { data: { user: currentUser }, error } = await supabase.auth.getUser();
+        if (userDocument) {
+            setKycStatus(userDocument.metadata?.kyc_status || null);
 
-            if (currentUser) {
-                // Fetch Profile from public.users if needed, or use metadata
-                // Supabase Auth user object structure is different from Firebase
-                const mappedUser = {
-                    ...currentUser,
-                    id: currentUser.id,
-                    user_metadata: currentUser.user_metadata,
-                    email: currentUser.email
-                };
-                setUser(mappedUser);
-
-                // Fetch KYC status
-                // Assuming 'kyc_status' is in 'users' table's metadata or a dedicated column?
-                // Schema shows 'metadata' JSONB.
-                const { data: profile } = await supabase
-                    .from('users')
-                    .select('metadata')
-                    .eq('id', currentUser.id)
-                    .single();
-
-                if (profile && profile.metadata) {
-                    setKycStatus(profile.metadata.kyc_status);
-                }
-
-                // Pre-fill form
-                const fullName = currentUser.user_metadata?.full_name || "";
+            const fullName = userDocument.fullName || "";
+            setFormData(prev => ({
+                ...prev,
+                firstName: fullName.split(' ')[0] || "",
+                lastName: fullName.split(' ').slice(1).join(' ') || "",
+                email: userDocument.email || user?.email || ""
+            }));
+        } else {
+            const demoUser = localStorage.getItem('DEMO_USER_SESSION');
+            if (demoUser) {
+                const parsed = JSON.parse(demoUser);
                 setFormData(prev => ({
                     ...prev,
-                    firstName: fullName.split(' ')[0] || "",
-                    lastName: fullName.split(' ').slice(1).join(' ') || "",
-                    email: currentUser.email || ""
+                    firstName: parsed.user_metadata?.full_name?.split(' ')[0] || "",
+                    lastName: parsed.user_metadata?.full_name?.split(' ').slice(1).join(' ') || "",
+                    email: parsed.email || ""
                 }));
-            } else {
-                const demoUser = localStorage.getItem('DEMO_USER_SESSION');
-                if (demoUser) {
-                    const parsed = JSON.parse(demoUser);
-                    setUser(parsed);
-                    setFormData(prev => ({
-                        ...prev,
-                        firstName: parsed.user_metadata?.full_name?.split(' ')[0] || "",
-                        lastName: parsed.user_metadata?.full_name?.split(' ').slice(1).join(' ') || "",
-                        email: parsed.email || ""
-                    }));
-                }
             }
-        };
-
-        checkUser();
-
-        // Listen for auth changes
-        const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-            if (session?.user) {
-                const currentUser = session.user;
-                const mappedUser = {
-                    ...currentUser,
-                    id: currentUser.id,
-                    user_metadata: currentUser.user_metadata,
-                    email: currentUser.email
-                };
-                setUser(mappedUser);
-
-                // Fetch Profile for KYC
-                const { data: profile } = await supabase
-                    .from('users')
-                    .select('metadata')
-                    .eq('id', currentUser.id)
-                    .single();
-
-                if (profile && profile.metadata) {
-                    setKycStatus(profile.metadata.kyc_status);
-                }
-
-                // Pre-fill form
-                const fullName = currentUser.user_metadata?.full_name || "";
-                setFormData(prev => ({
-                    ...prev,
-                    firstName: fullName.split(' ')[0] || "",
-                    lastName: fullName.split(' ').slice(1).join(' ') || "",
-                    email: currentUser.email || ""
-                }));
-            } else {
-                setUser(null);
-            }
-        });
-
-        return () => {
-            subscription.unsubscribe();
-        };
-    }, []);
+        }
+    }, [userDocument, user]);
 
     const [isScriptLoaded, setIsScriptLoaded] = useState(false);
 

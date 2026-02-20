@@ -1,80 +1,88 @@
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    query,
+    orderBy,
+    getDocs,
+    doc,
+    addDoc,
+    updateDoc,
+    deleteDoc
+} from "firebase/firestore";
+import { safeGetDocs } from "@/utils/firebase-utils";
 import { ServiceItem } from "@/types";
 
+const COLLECTION = 'repair_services';
+
 export const getServices = async (): Promise<ServiceItem[]> => {
-    const supabase = createClient();
-
     try {
-        const { data, error } = await supabase
-            .from('repair_services')
-            .select('*')
-            .order('name', { ascending: true });
+        const servicesRef = collection(db, COLLECTION);
+        const q = query(servicesRef, orderBy('name', 'asc'));
+        const snapshot = await safeGetDocs(q);
 
-        if (error) {
-            console.warn("Supabase fetch failed. Returning mock data.", error);
-            // Fallback
-            return [
-                {
-                    id: 'mock-1',
-                    name: 'HDMI Port Replacement (Mock)',
-                    category: 'Repair',
-                    price: 2499,
-                    duration: '24h',
-                    status: 'Active',
-                    description: 'Fixing broken or loose HDMI ports.'
-                },
-                {
-                    id: 'mock-2',
-                    name: 'Thermal Paste Re-application (Mock)',
-                    category: 'Maintenance',
-                    price: 999,
-                    duration: '4h',
-                    status: 'Active',
-                    description: 'High-performance cooling solution.'
-                }
-            ];
+        if (snapshot.empty) {
+            return getFallbackServices();
         }
 
-        return data as ServiceItem[];
+        return snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+        })) as ServiceItem[];
     } catch (error) {
-        console.warn("Service fetch error. Returning mock data.", error);
-        return [
-            {
-                id: 'mock-1',
-                name: 'HDMI Port Replacement (Mock)',
-                category: 'Repair',
-                price: 2499,
-                duration: '24h',
-                status: 'Active',
-                description: 'Fixing broken or loose HDMI ports.'
-            },
-            {
-                id: 'mock-2',
-                name: 'Thermal Paste Re-application (Mock)',
-                category: 'Maintenance',
-                price: 999,
-                duration: '4h',
-                status: 'Active',
-                description: 'High-performance cooling solution.'
-            }
-        ];
+        console.warn("Firestore service fetch failed. Returning mock data.", error);
+        return getFallbackServices();
     }
 };
 
+const getFallbackServices = (): ServiceItem[] => [
+    {
+        id: 'mock-1',
+        name: 'HDMI Port Replacement (Mock)',
+        category: 'Repair',
+        price: 2499,
+        duration: '24h',
+        status: 'Active',
+        description: 'Fixing broken or loose HDMI ports.'
+    },
+    {
+        id: 'mock-2',
+        name: 'Thermal Paste Re-application (Mock)',
+        category: 'Maintenance',
+        price: 999,
+        duration: '4h',
+        status: 'Active',
+        description: 'High-performance cooling solution.'
+    }
+];
+
 export const createService = async (data: Partial<ServiceItem>) => {
-    const supabase = createClient();
-    const { error } = await supabase.from('repair_services').insert(data);
-    if (error) throw new Error(`Supabase insert failed: ${error.message}`);
+    try {
+        await addDoc(collection(db, COLLECTION), {
+            ...data,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+        });
+    } catch (error: any) {
+        throw new Error(`Firestore insert failed: ${error.message}`);
+    }
 };
 
 export const updateService = async (id: string, data: Partial<ServiceItem>) => {
-    const supabase = createClient();
-    const { error } = await supabase.from('repair_services').update(data).eq('id', id);
-    if (error) throw new Error(`Supabase update failed: ${error.message}`);
+    try {
+        const serviceRef = doc(db, COLLECTION, id);
+        await updateDoc(serviceRef, {
+            ...data,
+            updated_at: new Date().toISOString()
+        });
+    } catch (error: any) {
+        throw new Error(`Firestore update failed: ${error.message}`);
+    }
 };
 
 export const deleteService = async (id: string) => {
-    const supabase = createClient();
-    const { error } = await supabase.from('repair_services').delete().eq('id', id);
-    if (error) throw new Error(`Supabase delete failed: ${error.message}`);
+    try {
+        await deleteDoc(doc(db, COLLECTION, id));
+    } catch (error: any) {
+        throw new Error(`Firestore delete failed: ${error.message}`);
+    }
 };

@@ -1,14 +1,17 @@
-
-import { createClient } from "@/lib/supabase/client";
-import { CommercePayment } from "@/types/commerce";
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    addDoc,
+    doc,
+    updateDoc
+} from "firebase/firestore";
 
 export const PaymentGateway = {
     /**
      * Step 1: Create Order on Razorpay/Stripe (Simulated)
      */
-    initiatePayment: async (orderId: string, amount: number, gateway: 'razorpay' | 'stripe') => {
+    initiatePayment: async (order_id: string, amount: number, gateway: 'razorpay' | 'stripe') => {
         // In a real backend, this calls Razorpay API orders.create()
-        // Here we simulate returning an order_id
         const providerOrderId = gateway === 'razorpay' ? `order_${Date.now()}` : `pi_${Date.now()}`;
 
         return {
@@ -22,57 +25,52 @@ export const PaymentGateway = {
 
     /**
      * Step 4-6: Webhook Handler (Simulated)
-     * Verifies signature and updates DB
      */
     handleWebhook: async (
         eventData: any,
         signature: string,
         gateway: 'razorpay' | 'stripe'
     ) => {
-        // Verify Signature Logic (crypto.createHmac...)
-        const isVerified = true; // Simulated verification
-        const supabase = createClient();
+        // Verify Signature Logic (Simulated)
+        const isVerified = true;
 
         if (isVerified) {
-            const { order_id, payment_id } = eventData;
+            const { order_id } = eventData;
 
-            // 1. Log Payment
-            const paymentData = {
-                order_id,
-                gateway,
-                razorpay_order_id: gateway === 'razorpay' ? eventData.razorpay_order_id : undefined,
-                payment_intent_id: gateway === 'stripe' ? eventData.payment_intent : undefined,
-                status: 'success',
-                amount: eventData.amount,
-                currency: 'INR',
-                webhook_verified: true,
-                created_at: new Date().toISOString()
-            };
+            try {
+                // 1. Log Payment
+                const paymentData = {
+                    order_id,
+                    gateway,
+                    razorpay_order_id: gateway === 'razorpay' ? eventData.razorpay_order_id : null,
+                    payment_intent_id: gateway === 'stripe' ? eventData.payment_intent : null,
+                    status: 'success',
+                    amount: eventData.amount,
+                    currency: 'INR',
+                    webhook_verified: true,
+                    created_at: new Date().toISOString()
+                };
 
-            const { error: paymentError } = await supabase.from('payments').insert(paymentData);
-            if (paymentError) console.error("Payment Log Error:", paymentError);
+                await addDoc(collection(db, 'payments'), paymentData);
 
-            // 2. Update Order Status
-            const { error: orderError } = await supabase
-                .from('orders')
-                .update({
+                // 2. Update Order Status
+                const orderDocRef = doc(db, 'orders', order_id);
+                await updateDoc(orderDocRef, {
                     payment_status: 'paid',
-                    status: 'CONFIRMED', // Auto-confirm on payment
+                    status: 'CONFIRMED',
                     updated_at: new Date().toISOString()
-                })
-                .eq('id', order_id);
+                });
 
-            if (orderError) {
-                console.error("Order Update Error:", orderError);
-                return { success: false, error: "Order update failed" };
+                // 3. Trigger AI Approval
+                return {
+                    success: true,
+                    shouldTriggerAI: true,
+                    orderId: order_id
+                };
+            } catch (error) {
+                console.error("Payment Process Error (Firestore):", error);
+                return { success: false, error: "Database update failed" };
             }
-
-            // 3. Trigger AI Approval (Return true to signal caller to run AI)
-            return {
-                success: true,
-                shouldTriggerAI: true,
-                orderId: order_id
-            };
         }
 
         return { success: false, error: "Signature Mismatch" };

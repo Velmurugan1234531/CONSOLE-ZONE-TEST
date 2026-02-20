@@ -1,6 +1,14 @@
-
-import { createClient } from "@/lib/supabase/client";
-import { SupabaseClient } from "@supabase/supabase-js";
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    query,
+    where,
+    getDocs,
+    doc,
+    getDoc,
+    limit as firestoreLimit
+} from "firebase/firestore";
+import { safeGetDocs, safeGetDoc } from "@/utils/firebase-utils";
 
 export interface BookingRequest {
     category: string;
@@ -14,22 +22,23 @@ export const BookingLogic = {
      * Finds an available console of the given category for the specified time range.
      * Returns the console_id if found, or null if no slot is available.
      */
-    async findAvailableConsole(category: string, startTime: Date, endTime: Date, supabaseClient?: SupabaseClient): Promise<string | null> {
-        const supabase = supabaseClient || createClient();
-
+    async findAvailableConsole(category: string, startTime: Date, endTime: Date): Promise<string | null> {
         try {
             // 1. Get all active consoles of the requested category
-            // We assume 'devices' table holds individual units.
-            // We assume 'devices' table holds individual units.
-            // not 'status', 'in', '("MAINTENANCE","LOST","UNDER_REPAIR")'
+            const devicesRef = collection(db, "devices");
+            const q = query(
+                devicesRef,
+                where("category", "==", category)
+            );
 
-            const { data: allConsoles, error } = await supabase
-                .from('devices')
-                .select('*')
-                .eq('category', category)
-                .not('status', 'in', '("MAINTENANCE","LOST","UNDER_REPAIR")');
+            const allConsolesSnap = await safeGetDocs(q);
 
-            if (error || !allConsoles || allConsoles.length === 0) {
+            // Filter out maintenance status locally if not-in query fails
+            const allConsoles = allConsolesSnap.docs
+                .map(d => ({ id: d.id, ...d.data() } as any))
+                .filter(d => !["MAINTENANCE", "LOST", "UNDER_REPAIR", "Maintenance", "Lost", "Under-Repair"].includes(d.status));
+
+            if (allConsoles.length === 0) {
                 console.warn(`No fleet found for category: ${category}`);
                 return null;
             }
@@ -38,20 +47,28 @@ export const BookingLogic = {
             const positionEnd = endTime.toISOString();
 
             for (const consoleItem of allConsoles) {
-                // Check overlaps for this specific console
-                // Overlap: (StartA <= EndB) and (EndA >= StartB)
-                // We check if ANY rental for this console overlaps.
+                // Check overlaps for this specific console in Firestore
+                const rentalsRef = collection(db, "rentals");
+                const rentalQ = query(
+                    rentalsRef,
+                    where("device_id", "==", consoleItem.id)
+                );
 
-                const { count, error: rentalError } = await supabase
-                    .from('rentals')
-                    .select('*', { count: 'exact', head: true })
-                    .eq('device_id', consoleItem.id) // using device_id as foreign key
-                    .not('status', 'in', '("cancelled","completed")')
-                    .lt('start_date', positionEnd)
-                    .gt('end_date', positionStart);
+                const rentalSnap = await safeGetDocs(rentalQ);
 
-                // If count is 0, no overlap
-                if (count === 0) {
+                // Filter active/booked rentals and check overlap client-side
+                const activeRentals = rentalSnap.docs.map(doc => doc.data());
+                const hasOverlap = activeRentals.some(rental => {
+                    if (["cancelled", "completed", "Cancelled", "Completed"].includes(rental.status)) return false;
+
+                    const rStart = rental.start_date;
+                    const rEnd = rental.end_date;
+
+                    // Overlap: (StartA < EndB) and (EndA > StartB)
+                    return rStart < positionEnd && rEnd > positionStart;
+                });
+
+                if (!hasOverlap) {
                     return consoleItem.id;
                 }
             }
@@ -66,60 +83,52 @@ export const BookingLogic = {
      * Get availability for a whole month (Calendar View)
      * Returns: { date: '2026-02-01', status: 'AVAILABLE' | 'FULL' }[]
      */
-    async getAvailabilityForMonth(category: string, year: number, month: number, supabaseClient?: SupabaseClient) {
-        const supabase = supabaseClient || createClient();
+    async getAvailabilityForMonth(category: string, year: number, month: number) {
         try {
             // 1. Get total active consoles count
-            const { count: totalConsoles, error: devError } = await supabase
-                .from('devices')
-                .select('*', { count: 'exact', head: true })
-                .eq('category', category)
-                .not('status', 'in', '("MAINTENANCE","LOST","UNDER_REPAIR")');
+            const devicesRef = collection(db, "devices");
+            const devSnap = await safeGetDocs(query(devicesRef, where("category", "==", category)));
+            const activeDevices = devSnap.docs
+                .map(d => ({ id: d.id, ...d.data() } as any))
+                .filter(d => !["MAINTENANCE", "LOST", "UNDER_REPAIR", "Maintenance", "Lost", "Under-Repair"].includes(d.status));
 
-            if (!totalConsoles || totalConsoles === 0) return [];
+            const totalConsoles = activeDevices.length;
+            if (totalConsoles === 0) return [];
 
-            // 2. Get all bookings for this month
-            const startDate = new Date(year, month - 1, 1).toISOString();
-            const endDate = new Date(year, month, 0).toISOString(); // Last day of month
+            const deviceIds = new Set(activeDevices.map(d => d.id));
 
-            // Fetch active bookings that overlap with this month
-            // Starts before month end AND ends after month start
-            const { data: bookings, error: rentalError } = await supabase
-                .from('rentals')
-                .select('start_date, end_date, device_id')
-                .not('status', 'in', '("cancelled","completed")')
-                .lt('start_date', endDate)
-                .gt('end_date', startDate);
+            // 2. Get all bookings for this month range
+            const startOfMonth = new Date(year, month - 1, 1).toISOString();
+            const endOfMonth = new Date(year, month, 0, 23, 59, 59).toISOString();
 
-            // We need to filter rentals that are for devices of THIS category.
-            // If rentals don't have category, we must join or pre-filter.
-            // My table schema doesn't have category on rentals, but has product_id / device_id.
-            // We can fetch device IDs for this category first.
-            const { data: devices } = await supabase
-                .from('devices')
-                .select('id')
-                .eq('category', category);
+            const rentalsRef = collection(db, "rentals");
+            // Fetch potential rentals (optimization: filter by device_id if few, else fetch all and filter)
+            // For month view, we fetch active rentals and filter locally
+            const rentalsSnap = await safeGetDocs(rentalsRef);
 
-            const deviceIds = new Set(devices?.map(d => d.id) || []);
+            const categoryBookings = rentalsSnap.docs
+                .map(doc => doc.data())
+                .filter(rental => {
+                    if (["cancelled", "completed"].includes(rental.status?.toLowerCase())) return false;
+                    if (!deviceIds.has(rental.device_id)) return false;
 
-            const categoryBookings = (bookings || []).filter(r => deviceIds.has(r.device_id));
+                    // Overlap with month: rental_start < month_end AND rental_end > month_start
+                    return rental.start_date < endOfMonth && rental.end_date > startOfMonth;
+                });
 
             // 3. Calculate daily status
             const daysInMonth = new Date(year, month, 0).getDate();
             const results = [];
 
             for (let day = 1; day <= daysInMonth; day++) {
-                const currentDayStart = new Date(year, month - 1, day);
-                const currentDayEnd = new Date(year, month - 1, day, 23, 59, 59);
+                const currentDayStart = new Date(year, month - 1, day).toISOString();
+                const currentDayEnd = new Date(year, month - 1, day, 23, 59, 59).toISOString();
 
                 // Count overlaps for this day
-                // Overlap logic: Booking Start < Day End AND Booking End > Day Start
                 const uniqueDevicesBooked = new Set();
 
                 categoryBookings.forEach((b: any) => {
-                    const bStart = new Date(b.start_date);
-                    const bEnd = new Date(b.end_date);
-                    if (bStart < currentDayEnd && bEnd > currentDayStart) {
+                    if (b.start_date < currentDayEnd && b.end_date > currentDayStart) {
                         uniqueDevicesBooked.add(b.device_id);
                     }
                 });
@@ -127,7 +136,7 @@ export const BookingLogic = {
                 const status = uniqueDevicesBooked.size >= totalConsoles ? 'FULL' : 'AVAILABLE';
 
                 results.push({
-                    date: currentDayStart.toISOString().split('T')[0],
+                    date: currentDayStart.split('T')[0],
                     status
                 });
             }
@@ -142,7 +151,7 @@ export const BookingLogic = {
     /**
      * Validate current user constraints for booking
      */
-    async validateUserConstraints(userId: string, supabaseClient?: SupabaseClient) {
+    async validateUserConstraints(userId: string) {
         // Bypass for demo users
         const isDemo = userId.startsWith('demo-') || userId === 'demo-user-123';
         if (isDemo) {
@@ -153,17 +162,11 @@ export const BookingLogic = {
             };
         }
 
-        const supabase = supabaseClient || createClient();
-
         try {
-            const { data: userData, error } = await supabase
-                .from('users')
-                .select('*')
-                .eq('id', userId)
-                .single();
+            const userSnap = await safeGetDoc(doc(db, "users", userId));
 
-            if (error || !userData) {
-                console.warn(`User ${userId} not found in DB. Treating as unverified.`);
+            if (!userSnap.exists()) {
+                console.warn(`User ${userId} not found in Firestore. Treating as unverified.`);
                 return {
                     isVerified: false,
                     canPickup: false,
@@ -171,16 +174,7 @@ export const BookingLogic = {
                 };
             }
 
-            // Map flat user table fields or metadata?
-            // Schema has 'kyc_status' in metadata usually, but let's check if my schema defined it as column.
-            // In 'supabase_schema.sql', I defined 'users' table.
-            // Let's assume I need to check columns.
-            // Previous code accessed userData.kyc_status directly.
-            // My schema probably has it as column or in metadata.
-            // To be safe, I'll check both or assume column if I migrated that way.
-            // Checking: I see I didn't verify the user schema columns fully, but 'admin-auth.ts' used metadata.
-            // Let's check metadata if column missing.
-
+            const userData: any = userSnap.data();
             const kycStatus = userData.kyc_status || userData.metadata?.kyc_status;
             const totalBookings = userData.total_bookings || userData.metadata?.total_bookings || 0;
 
@@ -191,7 +185,7 @@ export const BookingLogic = {
             };
 
         } catch (error: any) {
-            console.error(`User validation DB error for ${userId}: ${error.message}`);
+            console.error(`User validation Firestore error for ${userId}: ${error.message}`);
             throw new Error("User validation failed due to system error");
         }
     },

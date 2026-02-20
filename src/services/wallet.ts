@@ -1,4 +1,17 @@
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    query,
+    where,
+    orderBy,
+    limit as firestoreLimit,
+    doc,
+    getDoc,
+    updateDoc,
+    addDoc,
+    setDoc
+} from "firebase/firestore";
+import { safeGetDoc, safeGetDocs } from "@/utils/firebase-utils";
 
 export interface WalletTransaction {
     id: string;
@@ -27,23 +40,17 @@ export const getWalletBalance = async (userId: string): Promise<number> => {
         return 5000;
     }
 
-    const supabase = createClient();
-
     try {
-        const { data, error } = await supabase
-            .from('users')
-            .select('wallet_balance')
-            .eq('id', userId)
-            .single();
-
-        if (error) {
-            console.warn("Failed to fetch wallet balance", error);
+        const userSnap = await safeGetDoc(doc(db, "users", userId));
+        if (!userSnap.exists()) {
+            console.warn("User not found for wallet balance check", userId);
             return 0;
         }
 
+        const data = userSnap.data();
         return data?.wallet_balance || 0;
     } catch (error) {
-        console.warn("Failed to fetch wallet balance", error);
+        console.warn("Failed to fetch wallet balance from Firestore", error);
         return 0;
     }
 };
@@ -58,20 +65,17 @@ export const addCredits = async (
     referenceId?: string,
     description?: string
 ): Promise<WalletTransaction> => {
-    const supabase = createClient();
-
     try {
         // 1. Get current balance
         const currentBalance = await getWalletBalance(userId);
         const newBalance = currentBalance + amount;
 
         // 2. Update user balance
-        const { error: updateError } = await supabase
-            .from('users')
-            .update({ wallet_balance: newBalance })
-            .eq('id', userId);
-
-        if (updateError) throw updateError;
+        const userRef = doc(db, "users", userId);
+        await updateDoc(userRef, {
+            wallet_balance: newBalance,
+            updated_at: new Date().toISOString()
+        });
 
         // 3. Create transaction record
         const txnData = {
@@ -79,26 +83,20 @@ export const addCredits = async (
             amount,
             type: 'credit',
             source,
-            reference_id: referenceId,
+            reference_id: referenceId || null,
             balance_after: newBalance,
             description: description || `Credits added from ${source}`,
             created_at: new Date().toISOString()
         };
 
-        const { data: txn, error: txnError } = await supabase
-            .from('wallet_transactions')
-            .insert(txnData)
-            .select()
-            .single();
+        const txnRef = await addDoc(collection(db, "wallet_transactions"), txnData);
 
-        if (txnError) {
-            console.error("Failed to create transaction record:", txnError);
-            // In a real app we might want to rollback the balance update here
-        }
-
-        return txn as WalletTransaction;
+        return {
+            id: txnRef.id,
+            ...txnData
+        } as WalletTransaction;
     } catch (e: any) {
-        console.error("addCredits failed:", e);
+        console.error("addCredits failed (Firestore):", e);
         throw e;
     }
 };
@@ -113,8 +111,6 @@ export const deductCredits = async (
     referenceId?: string,
     description?: string
 ): Promise<WalletTransaction | null> => {
-    const supabase = createClient();
-
     try {
         // 1. Get current balance
         const currentBalance = await getWalletBalance(userId);
@@ -126,12 +122,11 @@ export const deductCredits = async (
         const newBalance = currentBalance - amount;
 
         // 2. Update user balance
-        const { error: updateError } = await supabase
-            .from('users')
-            .update({ wallet_balance: newBalance })
-            .eq('id', userId);
-
-        if (updateError) throw updateError;
+        const userRef = doc(db, "users", userId);
+        await updateDoc(userRef, {
+            wallet_balance: newBalance,
+            updated_at: new Date().toISOString()
+        });
 
         // 3. Create transaction record
         const txnData = {
@@ -139,25 +134,20 @@ export const deductCredits = async (
             amount,
             type: 'debit',
             source,
-            reference_id: referenceId,
+            reference_id: referenceId || null,
             balance_after: newBalance,
             description: description || `Credits deducted for ${source}`,
             created_at: new Date().toISOString()
         };
 
-        const { data: txn, error: txnError } = await supabase
-            .from('wallet_transactions')
-            .insert(txnData)
-            .select()
-            .single();
+        const txnRef = await addDoc(collection(db, "wallet_transactions"), txnData);
 
-        if (txnError) {
-            console.error("Failed to create transaction record:", txnError);
-        }
-
-        return txn as WalletTransaction;
+        return {
+            id: txnRef.id,
+            ...txnData
+        } as WalletTransaction;
     } catch (e: any) {
-        console.error("deductCredits failed:", e);
+        console.error("deductCredits failed (Firestore):", e);
         throw e;
     }
 };
@@ -168,7 +158,7 @@ export const deductCredits = async (
 export const getWalletHistory = async (userId: string, limitCount = 50): Promise<WalletTransaction[]> => {
     // Demo mode support
     if (userId === 'demo-user-123' || userId === 'u-001') {
-        return [
+        const demoHistory: WalletTransaction[] = [
             {
                 id: 'txn-demo-1',
                 user_id: userId,
@@ -203,22 +193,25 @@ export const getWalletHistory = async (userId: string, limitCount = 50): Promise
                 created_at: new Date(Date.now() - 86400000 * 10).toISOString()
             }
         ];
+        return demoHistory;
     }
 
-    const supabase = createClient();
-
     try {
-        const { data, error } = await supabase
-            .from('wallet_transactions')
-            .select('*')
-            .eq('user_id', userId)
-            .order('created_at', { ascending: false })
-            .limit(limitCount);
+        const txnsRef = collection(db, "wallet_transactions");
+        const q = query(
+            txnsRef,
+            where("user_id", "==", userId),
+            orderBy("created_at", "desc"),
+            firestoreLimit(limitCount)
+        );
 
-        if (error) throw error;
-        return data as WalletTransaction[];
+        const snapshot = await safeGetDocs(q);
+        return snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+        })) as WalletTransaction[];
     } catch (error) {
-        console.error("Failed to fetch wallet history", error);
+        console.error("Failed to fetch wallet history from Firestore", error);
         return [];
     }
 };

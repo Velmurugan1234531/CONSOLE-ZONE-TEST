@@ -1,4 +1,16 @@
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    query,
+    where,
+    orderBy,
+    onSnapshot,
+    addDoc,
+    updateDoc,
+    deleteDoc,
+    doc
+} from "firebase/firestore";
+import { safeGetDocs } from "@/utils/firebase-utils";
 
 export interface NoteDocument {
     id: string;
@@ -9,32 +21,32 @@ export interface NoteDocument {
     user_id?: string;
 }
 
-const supabase = createClient();
+const COLLECTION = 'notes';
 
 /**
  * Create a new note
  */
 export async function createNote(userId: string, title: string, content: string): Promise<NoteDocument> {
-    const { data, error } = await supabase
-        .from('notes')
-        .insert({
+    try {
+        const docRef = await addDoc(collection(db, COLLECTION), {
             user_id: userId,
             title,
-            content
-        })
-        .select()
-        .single();
+            content,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+        });
 
-    if (error) throw new Error(`Failed to create note: ${error.message}`);
-
-    return {
-        id: data.id,
-        title: data.title,
-        content: data.content,
-        createdAt: data.created_at,
-        updatedAt: data.updated_at,
-        user_id: data.user_id
-    };
+        return {
+            id: docRef.id,
+            title,
+            content,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            user_id: userId
+        };
+    } catch (error: any) {
+        throw new Error(`Failed to create note: ${error.message}`);
+    }
 }
 
 /**
@@ -46,81 +58,86 @@ export async function updateNote(
     title: string,
     content: string
 ): Promise<void> {
-    const { error } = await supabase
-        .from('notes')
-        .update({
+    try {
+        const noteRef = doc(db, COLLECTION, noteId);
+        await updateDoc(noteRef, {
             title,
             content,
             updated_at: new Date().toISOString()
-        })
-        .eq('id', noteId)
-        .eq('user_id', userId);
-
-    if (error) throw new Error(`Failed to update note: ${error.message}`);
+        });
+    } catch (error: any) {
+        throw new Error(`Failed to update note: ${error.message}`);
+    }
 }
 
 /**
  * Delete a note
  */
 export async function deleteNote(userId: string, noteId: string): Promise<void> {
-    const { error } = await supabase
-        .from('notes')
-        .delete()
-        .eq('id', noteId)
-        .eq('user_id', userId);
-
-    if (error) throw new Error(`Failed to delete note: ${error.message}`);
+    try {
+        const noteRef = doc(db, COLLECTION, noteId);
+        await deleteDoc(noteRef);
+    } catch (error: any) {
+        throw new Error(`Failed to delete note: ${error.message}`);
+    }
 }
 
 /**
  * Get all notes for a user
  */
 export async function getUserNotes(userId: string): Promise<NoteDocument[]> {
-    const { data, error } = await supabase
-        .from('notes')
-        .select('*')
-        .eq('user_id', userId)
-        .order('updated_at', { ascending: false });
+    try {
+        const notesRef = collection(db, COLLECTION);
+        const q = query(
+            notesRef,
+            where('user_id', '==', userId),
+            orderBy('updated_at', 'desc')
+        );
+        const snapshot = await safeGetDocs(q);
 
-    if (error) throw new Error(`Failed to fetch notes: ${error.message}`);
-
-    return data.map(note => ({
-        id: note.id,
-        title: note.title,
-        content: note.content,
-        createdAt: note.created_at,
-        updatedAt: note.updated_at,
-        user_id: note.user_id
-    }));
+        return snapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+                id: doc.id,
+                title: data.title,
+                content: data.content,
+                createdAt: data.created_at,
+                updatedAt: data.updated_at,
+                user_id: data.user_id
+            };
+        });
+    } catch (error: any) {
+        throw new Error(`Failed to fetch notes: ${error.message}`);
+    }
 }
 
 /**
  * Listen to real-time note updates
  */
 export function subscribeToNotes(userId: string, callback: (notes: NoteDocument[]) => void): () => void {
-    const channel = supabase
-        .channel('notes-changes')
-        .on(
-            'postgres_changes',
-            {
-                event: '*',
-                schema: 'public',
-                table: 'notes',
-                filter: `user_id=eq.${userId}`
-            },
-            async (payload) => {
-                // Fetch fresh data on any change
-                const notes = await getUserNotes(userId);
-                callback(notes);
-            }
-        )
-        .subscribe();
+    const notesRef = collection(db, COLLECTION);
+    const q = query(
+        notesRef,
+        where('user_id', '==', userId),
+        orderBy('updated_at', 'desc')
+    );
 
-    // Initial fetch
-    getUserNotes(userId).then(callback).catch(console.error);
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+        const notes = snapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+                id: doc.id,
+                title: data.title,
+                content: data.content,
+                createdAt: data.created_at,
+                updatedAt: data.updated_at,
+                user_id: data.user_id
+            };
+        });
+        callback(notes);
+    }, (error) => {
+        console.error("Firestore subscription error:", error);
+    });
 
-    return () => {
-        supabase.removeChannel(channel);
-    };
+    return unsubscribe;
 }
-

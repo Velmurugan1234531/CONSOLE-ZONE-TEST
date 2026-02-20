@@ -3,7 +3,8 @@
 import React, { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import LocationModal from "@/components/location/LocationModal";
 import { io, Socket } from "socket.io-client";
-import { createClient } from "@/lib/supabase/client";
+import { auth } from "@/lib/firebase";
+import { onAuthStateChanged, User as FirebaseUser } from "firebase/auth";
 
 interface LocationContextType {
     coords: GeolocationCoordinates | null;
@@ -18,28 +19,20 @@ export function LocationProvider({ children }: { children: ReactNode }) {
     const [status, setStatus] = useState<"idle" | "requesting" | "denied" | "granted">("idle");
     const [error, setError] = useState<string | null>(null);
     const [socket, setSocket] = useState<Socket | null>(null);
-    const [user, setUser] = useState<any>(null);
-    const supabase = createClient();
+    const [user, setUser] = useState<FirebaseUser | null>(null);
 
     useEffect(() => {
-        // Initial session check
-        supabase.auth.getSession().then(({ data: { session } }) => {
-            setUser(session?.user ?? null);
+        const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+            setUser(currentUser);
         });
 
-        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-            setUser(session?.user ?? null);
-        });
-
-        return () => {
-            subscription.unsubscribe();
-        };
+        return () => unsubscribe();
     }, []);
 
     // Check for existing permissions on mount
     useEffect(() => {
         if (typeof window !== "undefined" && navigator.permissions) {
-            navigator.permissions.query({ name: 'geolocation' }).then((permissionStatus) => {
+            navigator.permissions.query({ name: 'geolocation' as PermissionName }).then((permissionStatus) => {
                 if (permissionStatus.state === 'granted') {
                     requestLocation();
                 } else if (permissionStatus.state === 'denied') {
@@ -62,17 +55,21 @@ export function LocationProvider({ children }: { children: ReactNode }) {
     // Socket.IO Initialization
     useEffect(() => {
         if (status === "granted" && user) {
-            // Use environment variable for socket connection
             const socketUrl = process.env.NEXT_PUBLIC_SOCKET_URL || "http://localhost:3001";
-            // Get session token for socket auth
-            supabase.auth.getSession().then(({ data: { session } }) => {
-                if (session) {
+
+            const initSocket = async () => {
+                try {
+                    const token = await user.getIdToken();
                     const socketInstance = io(socketUrl, {
-                        auth: { token: session.access_token } // Use Supabase access token
+                        auth: { token }
                     });
                     setSocket(socketInstance);
+                } catch (e) {
+                    console.error("Socket initialization failed (Firebase Auth):", e);
                 }
-            });
+            };
+
+            initSocket();
 
             return () => {
                 if (socket) socket.disconnect();
@@ -81,7 +78,7 @@ export function LocationProvider({ children }: { children: ReactNode }) {
     }, [status, user]);
 
     const requestLocation = () => {
-        if (!navigator.geolocation) {
+        if (typeof window === "undefined" || !navigator.geolocation) {
             setError("Geolocation is not supported by your browser.");
             setStatus("denied");
             return;
@@ -95,7 +92,6 @@ export function LocationProvider({ children }: { children: ReactNode }) {
                 startContinuousTracking();
             },
             (err) => {
-                // User denied or geolocation unavailable - this is expected behavior
                 console.warn("Geolocation permission not granted:", err.message || "User denied location access");
                 setStatus("denied");
                 setError(err.message);
@@ -105,14 +101,15 @@ export function LocationProvider({ children }: { children: ReactNode }) {
     };
 
     const startContinuousTracking = () => {
+        if (typeof window === "undefined" || !navigator.geolocation) return;
+
         navigator.geolocation.watchPosition(
             (position) => {
                 setCoords(position.coords);
-                // Socket emission logic handled in a separate useEffect triggered by coords change
             },
             (err) => console.warn("Location tracking update failed:", err.message || "Unable to track location"),
             {
-                enableHighAccuracy: false, // Battery optimized
+                enableHighAccuracy: false,
                 maximumAge: 10000,
                 timeout: 10000,
             }
@@ -122,9 +119,8 @@ export function LocationProvider({ children }: { children: ReactNode }) {
     const [lastSentCoords, setLastSentCoords] = useState<{ lat: number, lng: number } | null>(null);
     const [lastSentTime, setLastSentTime] = useState<number>(0);
 
-    // Calculate distance between two points in meters
     const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number) => {
-        const R = 6371e3; // Earth radius in meters
+        const R = 6371e3;
         const φ1 = lat1 * Math.PI / 180;
         const φ2 = lat2 * Math.PI / 180;
         const Δφ = (lat2 - lat1) * Math.PI / 180;
@@ -138,7 +134,6 @@ export function LocationProvider({ children }: { children: ReactNode }) {
         return R * c;
     };
 
-    // Emit updates via Socket.IO
     useEffect(() => {
         if (!socket || !coords || !user) return;
 
@@ -147,9 +142,8 @@ export function LocationProvider({ children }: { children: ReactNode }) {
         const lng = coords.longitude;
 
         if (!lastSentCoords) {
-            // First update
             socket.emit("customer_location_update", {
-                lat, lng, speed: coords.speed, heading: coords.heading, timestamp: now, userId: user.id
+                lat, lng, speed: coords.speed, heading: coords.heading, timestamp: now, userId: user.uid
             });
             setLastSentCoords({ lat, lng });
             setLastSentTime(now);
@@ -159,10 +153,9 @@ export function LocationProvider({ children }: { children: ReactNode }) {
         const distance = calculateDistance(lat, lng, lastSentCoords.lat, lastSentCoords.lng);
         const timeElapsed = now - lastSentTime;
 
-        // Rules: 5 seconds minimum OR 15 meters moved
         if (timeElapsed >= 5000 || distance >= 15) {
             socket.emit("customer_location_update", {
-                lat, lng, speed: coords.speed, heading: coords.heading, timestamp: now, userId: user.id
+                lat, lng, speed: coords.speed, heading: coords.heading, timestamp: now, userId: user.uid
             });
             setLastSentCoords({ lat, lng });
             setLastSentTime(now);
@@ -177,7 +170,6 @@ export function LocationProvider({ children }: { children: ReactNode }) {
     );
 }
 
-
 export function useLocation() {
     const context = useContext(LocationContext);
     if (context === undefined) {
@@ -185,4 +177,3 @@ export function useLocation() {
     }
     return context;
 }
-

@@ -1,81 +1,72 @@
-
-import { createClient } from "@supabase/supabase-js";
+import { db } from "../lib/firebase";
+import {
+    collection,
+    query,
+    limit,
+    getDocs,
+    addDoc,
+    doc,
+    deleteDoc,
+    serverTimestamp
+} from "firebase/firestore";
+import { safeGetDocs } from "../utils/firebase-utils";
 import dotenv from "dotenv";
 import path from "path";
 
 // Load env vars from .env.local
 dotenv.config({ path: path.resolve(process.cwd(), ".env.local") });
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-
-if (!supabaseUrl || !supabaseKey) {
-    console.error("Missing Supabase credentials in .env.local");
-    process.exit(1);
-}
-
-const supabase = createClient(supabaseUrl, supabaseKey);
-
 async function runDebug() {
-    console.log("--- DEBUGGING DEVICES TABLE ---");
+    console.log("--- DEBUGGING DEVICES COLLECTION (FIRESTORE) ---");
 
-    // 1. Inspect existing row to see columns
-    const { data: existing, error: fetchError } = await supabase
-        .from('devices')
-        .select('*')
-        .limit(1);
+    try {
+        // 1. Inspect existing documents to see fields
+        const devicesRef = collection(db, 'devices');
+        const q = query(devicesRef, limit(1));
+        const snapshot = await safeGetDocs(q);
 
-    if (fetchError) {
-        console.error("Fetch Error:", fetchError);
-    } else if (existing && existing.length > 0) {
-        console.log("Existing Row Keys:", Object.keys(existing[0]));
-        console.log("Sample Row:", existing[0]);
-    } else {
-        console.log("No devices found to inspect columns.");
-    }
+        if (!snapshot.empty) {
+            const firstDoc = snapshot.docs[0];
+            console.log("Existing Doc ID:", firstDoc.id);
+            console.log("Existing Doc Fields:", Object.keys(firstDoc.data()));
+            console.log("Sample Doc Data:", firstDoc.data());
+        } else {
+            console.log("No devices found in Firestore to inspect.");
+        }
 
-    // 2. Try Standard Insert (Minimal)
-    console.log("\n--- TEST: Minimal Insert ---");
-    const serial1 = `TEST-MIN-${Date.now()}`;
-    const { data: data1, error: error1 } = await supabase
-        .from('devices')
-        .insert({
+        // 2. Try Standard Insert (Minimal)
+        console.log("\n--- TEST: Minimal Insert ---");
+        const serial1 = `TEST-MIN-${Date.now()}`;
+        const docRef1 = await addDoc(devicesRef, {
             serial_number: serial1,
-            status: 'AVAILABLE'
-        })
-        .select()
-        .single();
+            status: 'AVAILABLE',
+            created_at: new Date().toISOString()
+        });
 
-    if (error1) {
-        console.error("Minimal Insert Failed:", error1);
-    } else {
-        console.log("Minimal Insert Success:", data1);
+        console.log("Minimal Insert Success. ID:", docRef1.id);
+
         // Clean up
-        await supabase.from('devices').delete().eq('id', data1.id);
-    }
+        await deleteDoc(docRef1);
+        console.log("Cleaned up Minimal Insert.");
 
-    // 3. Try Metadata Insert
-    console.log("\n--- TEST: Metadata Insert ---");
-    const serial2 = `TEST-META-${Date.now()}`;
-    const { data: data2, error: error2 } = await supabase
-        .from('devices')
-        .insert({
+        // 3. Try Nested Metadata Insert
+        console.log("\n--- TEST: Metadata Insert ---");
+        const serial2 = `TEST-META-${Date.now()}`;
+        const docRef2 = await addDoc(devicesRef, {
             serial_number: serial2,
             status: 'AVAILABLE',
-            metadata: { model: 'Test Model', foo: 'bar' }
-        })
-        .select()
-        .single();
+            metadata: { model: 'Test Model', foo: 'bar' },
+            created_at: new Date().toISOString()
+        });
 
-    if (error2) {
-        console.error("Metadata Insert Failed:", error2);
-        if (error2.code === '42703') { // Undefined column
-            console.log(">> CONFIRMED: 'metadata' column does NOT exist.");
-        }
-    } else {
-        console.log("Metadata Insert Success:", data2);
+        console.log("Metadata Insert Success. ID:", docRef2.id);
+
         // Clean up
-        await supabase.from('devices').delete().eq('id', data2.id);
+        await deleteDoc(docRef2);
+        console.log("Cleaned up Metadata Insert.");
+
+    } catch (error) {
+        console.error("Debug Script Failed:", error);
     }
 }
 

@@ -1,8 +1,6 @@
 
 import { NextResponse } from "next/server";
 import { BookingLogic } from "@/services/booking-logic";
-import { createClient } from "@/lib/supabase/server";
-import { cookies } from "next/headers";
 import { PLANS } from "@/constants";
 import { NeuralSyncService } from "@/services/neural-sync";
 import { sendNotification } from "@/services/notifications";
@@ -22,9 +20,10 @@ export async function POST(req: Request) {
             addons
         } = body;
 
-        // Initialize Supabase Client
-        const cookieStore = await cookies();
-        const supabase = createClient(cookieStore);
+        // Initialize Firestore
+        const { db } = await import("@/lib/firebase");
+        const { collection, addDoc, updateDoc, doc, query, where, getDocs, Timestamp } = await import("firebase/firestore");
+        const { safeGetDocs, safeGetDoc } = await import("@/utils/firebase-utils");
 
         console.log("Booking Request Received:", {
             hasUserId: !!userId,
@@ -47,7 +46,7 @@ export async function POST(req: Request) {
         if (authenticatedUserId && authenticatedUserId !== 'guest') {
             try {
                 // Use the authenticated ID for constraints check
-                const constraints = await BookingLogic.validateUserConstraints(authenticatedUserId, supabase);
+                const constraints = await BookingLogic.validateUserConstraints(authenticatedUserId);
 
                 // CRITICAL: Block all bookings if not APPROVED
                 if (!constraints.isVerified) {
@@ -82,11 +81,11 @@ export async function POST(req: Request) {
         const isDemo = userId.startsWith('demo-');
 
         let consoleId;
-        // Logic handles Supabase internally now
+        // Logic handles Firestore internally
         if (isDemo) {
             consoleId = await (BookingLogic as any).mockFindAvailableConsole(productCategory);
         } else {
-            consoleId = await BookingLogic.findAvailableConsole(productCategory, start, end, supabase);
+            consoleId = await BookingLogic.findAvailableConsole(productCategory, start, end);
         }
 
         if (!consoleId) {
@@ -107,7 +106,7 @@ export async function POST(req: Request) {
             });
         }
 
-        // 3a. Upsert User Profile (Save/Update client details)
+        // 3a. Update User Profile (Save/Update client details)
         if (userId && userId !== 'guest') {
             try {
                 const profileData: any = {
@@ -122,19 +121,11 @@ export async function POST(req: Request) {
                 if (body.email) profileData.email = body.email;
                 if (body.mobile) profileData.phone = body.mobile;
 
-                // Upsert user profile (insert or update)
-                // Using Supabase
-                const { error } = await supabase
-                    .from('users')
-                    .update(profileData)
-                    .eq('id', userId);
-
-                if (error) {
-                    // If update failed, maybe strict RLS or user doesnt exist?
-                    console.warn('Could not update user profile (Supabase):', error);
-                }
+                // Update user profile
+                const userRef = doc(db, "users", userId);
+                await updateDoc(userRef, profileData);
             } catch (e) {
-                console.warn('Could not update user profile:', e);
+                console.warn('Could not update user profile in Firestore:', e);
             }
         }
 
@@ -142,14 +133,12 @@ export async function POST(req: Request) {
         let productId = null;
         try {
             // Find product by matching category
-            const { data: products } = await supabase
-                .from('products')
-                .select('id')
-                .eq('category', productCategory)
-                .limit(1);
+            const productsRef = collection(db, "products");
+            const prodQ = query(productsRef, where("category", "==", productCategory));
+            const prodSnap = await safeGetDocs(prodQ);
 
-            if (products && products.length > 0) {
-                productId = products[0].id;
+            if (!prodSnap.empty) {
+                productId = prodSnap.docs[0].id;
             }
         } catch (e) { }
 
@@ -161,59 +150,36 @@ export async function POST(req: Request) {
         }
 
         const rentalData = {
-            user_id: (userId && userId !== 'guest') ? userId : null, // Ensure valid UUID or null
-            // For Supabase, if foreign key fails (e.g. guest), using null is safer if allowed.
-            // My schema: user_id UUID REFERENCES users(id). If null allowed? 
-            // Default PostgreSQL allows null FK unless NOT NULL. 
-            // My schema: user_id UUID REFERENCES... (implied nullable).
-            // But if userId is "guest" string, it will fail UUID check.
-            // So logic above (userId && userId !== 'guest') ? userId : null is correct.
-
-            device_id: consoleId, // consoleId is text ID from devices table
-            product_id: productId, // UUID from products table
-            plan_id: planId || "DAILY", // defaulting if missing
-
-            // Map logic: planId is just text in my schema 'duration_plan'.
+            user_id: (userId && userId !== 'guest') ? userId : null,
+            device_id: consoleId,
+            product_id: productId,
+            plan_id: planId || "DAILY",
             duration_plan: planId,
-
             start_date: start.toISOString(),
             end_date: end.toISOString(),
             status: 'Pending',
-            payment_status: 'paid', // Assuming payment successful if we reached here
+            payment_status: 'paid',
             total_price: body.totalAmount || 0,
             notes: noteContent,
-            addons: addons || [], // JSONB in schema
+            addons: addons || [],
             created_at: new Date().toISOString()
         };
 
-        const { data: rental, error: rentalError } = await supabase
-            .from('rentals')
-            .insert(rentalData)
-            .select()
-            .single();
-
-        if (rentalError) {
-            console.error("Failed to create rental record:", rentalError);
-            throw new Error("Failed to create booking record");
-        }
+        const rentalsRef = collection(db, "rentals");
+        const docRef = await addDoc(rentalsRef, rentalData);
 
         // 4. Update Console Status to RENTED
         try {
-            await supabase
-                .from('devices')
-                .update({ status: 'RENTED' })
-                .eq('id', consoleId);
+            const deviceRef = doc(db, "devices", consoleId);
+            await updateDoc(deviceRef, { status: 'RENTED' });
         } catch (e) {
-            console.warn("Failed to update device status to RENTED", e);
+            console.warn("Failed to update device status to RENTED in Firestore", e);
         }
-
-        // 5. Record Addons (logging usage) - already stored in 'addons' JSONB column
 
         // 6. Neural Sync Upgrade
         if (userId && userId !== 'guest') {
             try {
-                // calls Supabase internally
-                const newTotal = await NeuralSyncService.addXP(userId, 50, supabase);
+                const newTotal = await NeuralSyncService.addXP(userId, 50);
                 const transmission = Transmissions.SYNC.XP_GAINED(50, newTotal);
                 await sendNotification({
                     user_id: userId,
@@ -228,7 +194,7 @@ export async function POST(req: Request) {
 
         return NextResponse.json({
             success: true,
-            bookingId: rental.id,
+            bookingId: docRef.id,
             consoleId: consoleId,
             message: "Booking confirmed!"
         });

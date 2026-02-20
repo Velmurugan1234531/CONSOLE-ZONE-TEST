@@ -1,53 +1,53 @@
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    query,
+    where,
+    getDocs,
+    getDoc,
+    doc,
+    addDoc,
+    updateDoc
+} from "firebase/firestore";
+import { safeGetDoc, safeGetDocs } from "@/utils/firebase-utils";
+import { RentalProduct } from "@/types/rental";
 
-import { createClient } from "@/lib/supabase/client";
-import { RentalProduct } from "@/types/rental"; // Path updated from firebase to rental
-
-const TABLE = "products";
+const COLLECTION = "products";
 
 export const RentalProductService = {
     /**
      * Fetch all active rental products.
      */
     getAllProducts: async (): Promise<RentalProduct[]> => {
-        const supabase = createClient();
         try {
-            const { data, error } = await supabase
-                .from(TABLE)
-                .select('*')
-                .eq('type', 'rental') // Assuming 'rental' type for rental products based on previous context
-                // .eq('isActive', true) // Schema has 'status' not 'isActive'.
-                .eq('status', 'available'); // Assuming 'available' logic. Or check if 'isActive' existed in schema? No. 
-            // Schema has status: 'available' as default.
-            // Let's assume 'available' means active.
+            const productsRef = collection(db, COLLECTION);
+            const q = query(
+                productsRef,
+                where('type', '==', 'rental'),
+                where('status', '==', 'available')
+            );
 
-            if (error) {
-                console.error("Error fetching products Supabase:", error);
-                return [];
-            }
+            const snapshot = await safeGetDocs(q);
 
-            return data.map((doc: any) => ({
-                productId: doc.id,
-                name: doc.name,
-                description: doc.description,
-                rentalPricePerDay: doc.price, // Map price to rentalPricePerDay
-                category: doc.category,
-                images: doc.images,
-                stockAvailable: doc.stock, // Map stock to stockAvailable
-                isActive: doc.status === 'available',
-                // Add specific rental fields if stored in metadata or distinct columns
-                // Schema had: deposit_amount? No. 
-                // We might need to handle extra fields in metadata if they are not in schema.
-                // RentalProduct type has: depositAmount, gstPercent.
-                // These might be in metadata or we need to look at schema again. 
-                // Let's assume metadata for now if not in columns.
-                depositAmount: doc.metadata?.depositAmount || 0,
-                gstPercent: doc.metadata?.gstPercent || 18,
-
-                ...doc, // spread safeguards
-                id: doc.id // ensure id presence
-            } as unknown as RentalProduct));
+            return snapshot.docs.map((doc) => {
+                const data = doc.data();
+                return {
+                    productId: doc.id,
+                    name: data.name,
+                    description: data.description,
+                    rentalPricePerDay: data.price,
+                    category: data.category,
+                    images: data.images,
+                    stockAvailable: data.stock,
+                    isActive: data.status === 'available',
+                    depositAmount: data.metadata?.depositAmount || 0,
+                    gstPercent: data.metadata?.gstPercent || 18,
+                    ...data,
+                    id: doc.id
+                } as unknown as RentalProduct;
+            });
         } catch (error) {
-            console.error("Error fetching products:", error);
+            console.error("Error fetching products (Firestore):", error);
             return [];
         }
     },
@@ -56,20 +56,16 @@ export const RentalProductService = {
      * Get a single product by ID.
      */
     getProductById: async (productId: string): Promise<RentalProduct | null> => {
-        const supabase = createClient();
         try {
-            const { data, error } = await supabase
-                .from(TABLE)
-                .select('*')
-                .eq('id', productId)
-                .single();
+            const productSnap = await safeGetDoc(doc(db, COLLECTION, productId));
 
-            if (error || !data) {
+            if (!productSnap.exists()) {
                 return null;
             }
 
+            const data = productSnap.data();
             return {
-                productId: data.id,
+                productId: productSnap.id,
                 name: data.name,
                 description: data.description,
                 rentalPricePerDay: data.price,
@@ -79,22 +75,20 @@ export const RentalProductService = {
                 gstPercent: data.metadata?.gstPercent || 18,
                 category: data.category,
                 images: data.images,
-                ...data
+                ...data,
+                id: productSnap.id
             } as unknown as RentalProduct;
         } catch (error) {
-            console.error("Error fetching product:", error);
+            console.error("Error fetching product (Firestore):", error);
             return null;
         }
     },
 
     /**
      * Create a new rental product listing.
-     * RESTRICTED: Admin Only (Backend rules must enforce this).
      */
     createProduct: async (productData: Omit<RentalProduct, 'productId'>): Promise<string> => {
-        const supabase = createClient();
         try {
-            // Map RentalProduct to DB columns
             const dbData = {
                 name: productData.name,
                 description: productData.description,
@@ -105,24 +99,16 @@ export const RentalProductService = {
                 images: productData.images,
                 status: productData.isActive ? 'available' : 'disabled',
                 metadata: {
-                    // productData includes depositAmount, gstPercent, etc.
-                    // We store full object in metadata for extensibility
                     ...productData
                 },
                 created_at: new Date().toISOString(),
                 updated_at: new Date().toISOString()
             };
 
-            const { data, error } = await supabase
-                .from(TABLE)
-                .insert(dbData)
-                .select()
-                .single();
-
-            if (error) throw error;
-            return data.id;
+            const docRef = await addDoc(collection(db, COLLECTION), dbData);
+            return docRef.id;
         } catch (error) {
-            console.error("Error creating product:", error);
+            console.error("Error creating product (Firestore):", error);
             throw error;
         }
     },
@@ -131,8 +117,8 @@ export const RentalProductService = {
      * Update stock or details.
      */
     updateProduct: async (productId: string, updates: Partial<RentalProduct>): Promise<void> => {
-        const supabase = createClient();
         try {
+            const productDocRef = doc(db, COLLECTION, productId);
             const dbUpdates: any = {
                 updated_at: new Date().toISOString()
             };
@@ -145,16 +131,9 @@ export const RentalProductService = {
             if (updates.category) dbUpdates.category = updates.category;
             if (updates.images) dbUpdates.images = updates.images;
 
-            // For metadata updates, we need to fetch existing, merge, and update.
-            // Or just merge if Supabase supports jsonb merge update? 
-            // Supabase/request update merges top level fields, but for jsonb it replaces unless we use specialized query or fetch-modify-save.
-            // Let's do fetch-modify-save for metadata safety if needed, or just simplistic approach.
-            // Given simpler scope, let's assume partial updates to simple columns are most common.
-            // If metadata fields like depositAmount update, we should handle it.
-
             if (updates.depositAmount !== undefined || updates.gstPercent !== undefined) {
-                const { data: current } = await supabase.from(TABLE).select('metadata').eq('id', productId).single();
-                const currentMeta = current?.metadata || {};
+                const currentSnap = await safeGetDoc(productDocRef);
+                const currentMeta = currentSnap.exists() ? currentSnap.data().metadata : {};
                 dbUpdates.metadata = {
                     ...currentMeta,
                     ...(updates.depositAmount !== undefined ? { depositAmount: updates.depositAmount } : {}),
@@ -162,14 +141,9 @@ export const RentalProductService = {
                 };
             }
 
-            const { error } = await supabase
-                .from(TABLE)
-                .update(dbUpdates)
-                .eq('id', productId);
-
-            if (error) throw error;
+            await updateDoc(productDocRef, dbUpdates);
         } catch (error) {
-            console.error("Error updating product:", error);
+            console.error("Error updating product (Firestore):", error);
             throw error;
         }
     }

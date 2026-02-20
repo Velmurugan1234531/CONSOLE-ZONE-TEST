@@ -1,61 +1,50 @@
-import { createClient } from "@/lib/supabase/server";
-import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
+import { db } from "@/lib/firebase";
+import { collection, query, where, getDocs } from "firebase/firestore";
+import { safeGetDocs } from "@/utils/firebase-utils";
 
 export async function POST(req: Request) {
     try {
         const { query: userQuery } = await req.json();
         const lowerQuery = userQuery.toLowerCase();
 
-        const cookieStore = await cookies();
-        const supabase = createClient(cookieStore);
-
         let responseText = "I'm not sure how to help with that. Try asking about 'revenue', 'active rentals', or 'stock'.";
 
-        // Logic to interpret natural language queries and fetch real data
-
         if (lowerQuery.includes("sales") || lowerQuery.includes("revenue") || lowerQuery.includes("income")) {
-            const { data: paidOrders } = await supabase
-                .from('orders')
-                .select('total_amount')
-                .eq('payment_status', 'paid');
+            const ordersRef = collection(db, "orders");
+            const q = query(ordersRef, where("payment_status", "==", "paid"));
+            const snapshot = await safeGetDocs(q);
 
-            const total = paidOrders?.reduce((sum, order) => sum + (Number(order.total_amount) || 0), 0) || 0;
+            const total = snapshot.docs.reduce((sum, doc) => sum + (Number(doc.data().total_amount) || 0), 0) || 0;
             responseText = `Total revenue from sales is ₹${total.toLocaleString()}.`;
 
         } else if (lowerQuery.includes("rental") || lowerQuery.includes("booking")) {
-            const { count } = await supabase
-                .from('rentals')
-                .select('*', { count: 'exact', head: true })
-                .eq('status', 'active');
-            responseText = `There are currently ${count || 0} active rentals.`;
+            const rentalsRef = collection(db, "rentals");
+            const q = query(rentalsRef, where("status", "==", "active"));
+            const snapshot = await safeGetDocs(q);
+            responseText = `There are currently ${snapshot.size || 0} active rentals.`;
 
         } else if (lowerQuery.includes("stock") || lowerQuery.includes("inventory")) {
-            const { count: totalCount } = await supabase
-                .from('products')
-                .select('*', { count: 'exact', head: true });
+            const productsRef = collection(db, "products");
+            const totalSnap = await safeGetDocs(productsRef);
 
-            const { count: lowStockCount } = await supabase
-                .from('products')
-                .select('*', { count: 'exact', head: true })
-                .lt('stock', 5);
+            const lowStockQ = query(productsRef, where("stock", "<", 5));
+            const lowStockSnap = await safeGetDocs(lowStockQ);
 
-            responseText = `We have ${totalCount || 0} total items in inventory. ${lowStockCount || 0} items are low on stock.`;
+            responseText = `We have ${totalSnap.size || 0} total items in inventory. ${lowStockSnap.size || 0} items are low on stock.`;
 
         } else if (lowerQuery.includes("user") || lowerQuery.includes("customer")) {
-            const { count } = await supabase
-                .from('users')
-                .select('*', { count: 'exact', head: true });
-            responseText = `We have ${count || 0} registered users.`;
+            const usersRef = collection(db, "users");
+            const snapshot = await safeGetDocs(usersRef);
+            responseText = `We have ${snapshot.size || 0} registered users.`;
 
         } else if (lowerQuery.includes("overdue")) {
-            const { count: overdueCount } = await supabase
-                .from('rentals')
-                .select('*', { count: 'exact', head: true })
-                .eq('status', 'overdue');
+            const rentalsRef = collection(db, "rentals");
+            const q = query(rentalsRef, where("status", "==", "overdue"));
+            const snapshot = await safeGetDocs(q);
 
-            responseText = (overdueCount || 0) > 0
-                ? `Alert: There are ${overdueCount} overdue rentals requiring attention.`
+            responseText = (snapshot.size || 0) > 0
+                ? `Alert: There are ${snapshot.size} overdue rentals requiring attention.`
                 : "Good news! There are no overdue rentals at the moment.";
         }
 

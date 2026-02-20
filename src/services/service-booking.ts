@@ -1,9 +1,16 @@
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    addDoc,
+    query,
+    where,
+    orderBy,
+    getDocs
+} from "firebase/firestore";
+import { safeGetDocs } from "@/utils/firebase-utils";
 import { ServiceBooking } from "@/types";
 
 export const createServiceBooking = async (bookingData: Partial<ServiceBooking>) => {
-    const supabase = createClient();
-
     try {
         const payload = {
             ...bookingData,
@@ -11,18 +18,12 @@ export const createServiceBooking = async (bookingData: Partial<ServiceBooking>)
             status: bookingData.status || 'pending'
         };
 
-        const { data, error } = await supabase
-            .from('service_bookings')
-            .insert(payload)
-            .select()
-            .single();
+        const docRef = await addDoc(collection(db, 'service_bookings'), payload);
 
-        if (error) throw error;
-
-        console.log("Booking created with ID:", data.id);
-        return { id: data.id, ...payload };
+        console.log("Booking created with ID:", docRef.id);
+        return { id: docRef.id, ...payload };
     } catch (error) {
-        console.error("Error creating booking:", error);
+        console.error("Error creating booking (Firestore):", error);
         throw error;
     }
 };
@@ -34,27 +35,26 @@ export const getUserServiceBookings = async (userId: string) => {
         return DEMO_SERVICE_BOOKINGS || [];
     }
 
-    const supabase = createClient();
-
     try {
-        const { data, error } = await supabase
-            .from('service_bookings')
-            .select('*')
-            .eq('user_id', userId)
-            .order('created_at', { ascending: false });
+        const bookingsRef = collection(db, 'service_bookings');
+        const q = query(
+            bookingsRef,
+            where('user_id', '==', userId),
+            orderBy('created_at', 'desc')
+        );
 
-        if (error) {
-            console.error("Supabase fetch service bookings error:", error);
-            // Fallback
+        const snapshot = await safeGetDocs(q);
+
+        if (snapshot.empty) {
             return [];
         }
 
-        return data.map((doc: any) => ({
+        return snapshot.docs.map((doc) => ({
             id: doc.id,
-            ...doc
+            ...doc.data()
         }));
     } catch (error) {
-        console.error("Error fetching user bookings:", error);
+        console.error("Error fetching user bookings (Firestore):", error);
         return [];
     }
 };

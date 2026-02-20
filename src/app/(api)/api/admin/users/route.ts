@@ -1,20 +1,5 @@
-
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
-
-// Initialize Supabase Admin Client (Service Role)
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() || 'https://placeholder.supabase.co';
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || 'placeholder-key';
-const supabaseAdmin = createClient(
-    supabaseUrl,
-    supabaseKey,
-    {
-        auth: {
-            autoRefreshToken: false,
-            persistSession: false
-        }
-    }
-);
+import { adminAuth, adminDb } from "@/lib/firebase-admin";
 
 export async function POST(req: Request) {
     try {
@@ -26,59 +11,48 @@ export async function POST(req: Request) {
             return NextResponse.json({ success: false, error: "Missing required fields" }, { status: 400 });
         }
 
-        // 1. Create Auth User
-        const { data: userData, error: createError } = await supabaseAdmin.auth.admin.createUser({
+        // 1. Create Auth User in Firebase
+        const userRecord = await adminAuth.createUser({
             email,
             password,
-            email_confirm: true, // Auto-confirm email
-            user_metadata: {
-                full_name: fullName
-                // role: role || 'customer' // Storing role in metadata is good practice for Auth, but we also use 'users' table
-            }
+            displayName: fullName,
+            emailVerified: true,
         });
 
-        if (createError) {
-            console.error("Supabase Admin: Create User Error:", createError);
-            return NextResponse.json({ success: false, error: createError.message }, { status: 400 });
-        }
-
-        const user = userData.user;
-
-        // 2. Create Profile Entry in 'users' table
+        // 2. Create Profile Entry in 'users' collection (Firestore)
         // This mirrors the 'users' collection logic
         try {
-            const { error: profileError } = await supabaseAdmin
-                .from('users')
-                .insert({
-                    id: user.id,
-                    email: email,
-                    full_name: fullName,
-                    role: role || 'customer',
-                    created_at: new Date().toISOString(),
-                    updated_at: new Date().toISOString(),
-                    is_active: true,
-                    login_attempts: 0,
-                    metadata: { // Keeping metadata consistent
-                        source: 'admin_api'
-                    }
-                });
-
-            if (profileError) {
-                console.error("Profile creation warning:", profileError);
-                // If profile creation fails but auth user created, we have a sync issue.
-                // In production, we might want to rollback (info: Supabase doesn't have cross-service tx for Auth+DB yet in JS client easily).
-                // For now, warn.
-                return NextResponse.json({ success: false, error: "User created but profile failed: " + profileError.message }, { status: 500 });
-            }
+            const userRef = adminDb.collection('users').doc(userRecord.uid);
+            await userRef.set({
+                uid: userRecord.uid,
+                email: email,
+                role: role || 'customer',
+                isActive: true,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                lastLogin: null,
+                loginAttempts: 0,
+                lastLoginIP: "0.0.0.0",
+                fullName: fullName,
+                metadata: {
+                    source: 'admin_api',
+                    loginAttempts: 0,
+                    lastLoginIP: "0.0.0.0",
+                    lastLoginTimestamp: null,
+                    emailVerified: true,
+                    twoFactorEnabled: false
+                }
+            });
 
         } catch (profileError: any) {
-            console.error("Profile creation warning:", profileError);
+            console.error("Profile creation warning (Firestore):", profileError);
+            return NextResponse.json({ success: false, error: "User created in Auth but profile failed: " + profileError.message }, { status: 500 });
         }
 
-        return NextResponse.json({ success: true, user: user });
+        return NextResponse.json({ success: true, user: { uid: userRecord.uid, email: userRecord.email } });
 
     } catch (error: any) {
-        console.error("User creation failed:", error);
+        console.error("Firebase Admin: User creation failed:", error);
         return NextResponse.json({ success: false, error: error.message }, { status: 500 });
     }
 }

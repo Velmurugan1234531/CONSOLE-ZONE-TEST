@@ -1,97 +1,99 @@
-
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    query,
+    where,
+    orderBy,
+    getDocs,
+    getDoc,
+    doc,
+    setDoc,
+    addDoc,
+    deleteDoc
+} from "firebase/firestore";
+import { safeGetDocs, safeGetDoc } from "@/utils/firebase-utils";
 import { Content, ContentSchema } from "@/lib/schemas";
 
-export const getContent = async (type?: 'page' | 'post') => {
-    const supabase = createClient();
+const COLLECTION = 'content';
 
+export const getContent = async (type?: 'page' | 'post') => {
     try {
-        let query = supabase
-            .from('content')
-            .select('*')
-            .order('updated_at', { ascending: false });
+        const contentRef = collection(db, COLLECTION);
+        let q = query(contentRef, orderBy('updated_at', 'desc'));
 
         if (type) {
-            query = query.eq('type', type);
+            q = query(q, where('type', '==', type));
         }
 
-        const { data, error } = await query;
-
-        if (error) {
-            console.warn("Supabase getContent failed:", error);
-            return [];
-        }
-
-        return data as Content[];
+        const snapshot = await safeGetDocs(q);
+        return snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+        })) as Content[];
     } catch (error) {
-        console.warn("Supabase getContent failed:", error);
+        console.warn("Firestore getContent failed:", error);
         return [];
     }
 };
 
 export const getContentBySlug = async (slug: string) => {
-    const supabase = createClient();
-
     try {
-        const { data, error } = await supabase
-            .from('content')
-            .select('*')
-            .eq('slug', slug)
-            .single();
+        const contentRef = collection(db, COLLECTION);
+        const q = query(contentRef, where('slug', '==', slug));
+        const snapshot = await safeGetDocs(q);
 
-        if (error) {
-            // console.warn("Supabase getContentBySlug failed:", error); 
-            // If not found, returning null is expected
+        if (snapshot.empty) {
             return null;
         }
 
-        return data as Content;
+        const docSnap = snapshot.docs[0];
+        return {
+            id: docSnap.id,
+            ...docSnap.data()
+        } as Content;
     } catch (error) {
-        console.warn("Supabase getContentBySlug failed:", error);
+        console.warn("Firestore getContentBySlug failed:", error);
         return null;
     }
 };
 
 export const saveContent = async (content: Partial<Content>) => {
-    const supabase = createClient();
-
     const validated = ContentSchema.parse(content);
     const now = new Date().toISOString();
 
-    if (validated.id) {
-        // Update
-        const { data, error } = await supabase
-            .from('content')
-            .update({ ...validated, updated_at: now })
-            .eq('id', validated.id)
-            .select()
-            .single();
+    try {
+        if (validated.id) {
+            // Update
+            const docRef = doc(db, COLLECTION, validated.id);
+            await setDoc(docRef, {
+                ...validated,
+                updated_at: now
+            }, { merge: true });
 
-        if (error) throw error;
-        return data as Content;
-    } else {
-        // Insert
-        const { data, error } = await supabase
-            .from('content')
-            .insert({
+            const updatedSnap = await getDoc(docRef);
+            return { id: updatedSnap.id, ...updatedSnap.data() } as Content;
+        } else {
+            // Insert
+            const docRef = await addDoc(collection(db, COLLECTION), {
                 ...validated,
                 created_at: now,
                 updated_at: now
-            })
-            .select()
-            .single();
+            });
 
-        if (error) throw error;
-        return data as Content;
+            const newSnap = await getDoc(docRef);
+            return { id: newSnap.id, ...newSnap.data() } as Content;
+        }
+    } catch (error) {
+        console.error("Firestore saveContent failed:", error);
+        throw error;
     }
 };
 
 export const deleteContent = async (id: string) => {
-    const supabase = createClient();
-    const { error } = await supabase
-        .from('content')
-        .delete()
-        .eq('id', id);
-
-    if (error) throw error;
+    try {
+        await deleteDoc(doc(db, COLLECTION, id));
+    } catch (error) {
+        console.error("Firestore deleteContent failed:", error);
+        throw error;
+    }
 };

@@ -2,7 +2,7 @@
 import { auth, db } from "@/lib/firebase";
 import { signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from "firebase/firestore";
-import { safeGetDoc } from "@/utils/firebase-utils";
+import { safeGetDoc, safeGetDocs } from "@/utils/firebase-utils";
 
 export type UserRole = "super_admin" | "admin" | "sub_admin" | "staff" | "customer";
 
@@ -304,5 +304,23 @@ export async function resetLoginAttempts(targetUserId: string, adminUserId: stri
     } catch (error: any) {
         console.error("resetLoginAttempts failed:", error);
         throw new Error(error.message || "Operation failed");
+    }
+}
+
+/**
+ * Get all admin users from Firestore
+ */
+export async function getAllAdminUsers(): Promise<AdminUser[]> {
+    try {
+        const { collection, query, where, getDocs } = await import("firebase/firestore");
+        const usersRef = collection(db, "users");
+        // Firestore doesn't support 'in' with more than 10 items, but we only have 4 roles here, so it's fine.
+        const q = query(usersRef, where("role", "in", ["super_admin", "admin", "sub_admin", "staff"]));
+
+        const snapshot = await safeGetDocs(q);
+        return snapshot.docs.map(doc => mapUserToCamelCase({ id: doc.id, ...doc.data() }));
+    } catch (error: any) {
+        console.error("Failed to fetch admin users:", error);
+        return [];
     }
 }

@@ -1,5 +1,14 @@
-
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    query,
+    where,
+    orderBy,
+    limit as firestoreLimit,
+    doc,
+    addDoc
+} from "firebase/firestore";
+import { safeGetDocs } from "@/utils/firebase-utils";
 
 export interface AdminLog {
     id?: string;
@@ -14,16 +23,16 @@ export interface AdminLog {
     userAgent?: string;
 }
 
-function mapLogToCamelCase(data: any): AdminLog {
+function mapLogToCamelCase(id: string, data: any): AdminLog {
     return {
-        id: data.id,
+        id: id,
         adminId: data.admin_id,
         adminEmail: data.admin_email,
         action: data.action,
         targetUserId: data.target_user_id,
         targetUserEmail: data.target_user_email,
         details: data.details,
-        timestamp: new Date(data.timestamp), // Convert to Date object for frontend
+        timestamp: data.timestamp ? new Date(data.timestamp) : new Date(),
         ipAddress: data.ip_address,
         userAgent: data.user_agent
     };
@@ -33,23 +42,20 @@ function mapLogToCamelCase(data: any): AdminLog {
  * Log admin action
  */
 export async function logAdminAction(log: Omit<AdminLog, "id" | "timestamp">): Promise<void> {
-    const supabase = createClient();
-
-    const { error } = await supabase
-        .from('admin_logs')
-        .insert({
+    try {
+        await addDoc(collection(db, 'admin_logs'), {
             admin_id: log.adminId,
             admin_email: log.adminEmail,
             action: log.action,
-            target_user_id: log.targetUserId,
-            target_user_email: log.targetUserEmail,
-            details: log.details,
+            target_user_id: log.targetUserId || null,
+            target_user_email: log.targetUserEmail || null,
+            details: log.details || null,
             ip_address: log.ipAddress,
-            user_agent: log.userAgent,
+            user_agent: log.userAgent || null,
+            timestamp: new Date().toISOString()
         });
-
-    if (error) {
-        console.error("Failed to log admin action:", error);
+    } catch (error) {
+        console.error("Failed to log admin action Firestore:", error);
     }
 }
 
@@ -57,54 +63,56 @@ export async function logAdminAction(log: Omit<AdminLog, "id" | "timestamp">): P
  * Get all admin logs
  */
 export async function getAdminLogs(limitCount: number = 100): Promise<AdminLog[]> {
-    const supabase = createClient();
+    try {
+        const logsRef = collection(db, 'admin_logs');
+        const q = query(logsRef, orderBy('timestamp', 'desc'), firestoreLimit(limitCount));
+        const snapshot = await safeGetDocs(q);
 
-    const { data, error } = await supabase
-        .from('admin_logs')
-        .select('*')
-        .order('timestamp', { ascending: false })
-        .limit(limitCount);
-
-    if (error) {
-        console.error("Failed to fetch admin logs:", error);
+        return snapshot.docs.map(doc => mapLogToCamelCase(doc.id, doc.data()));
+    } catch (error) {
+        console.error("Failed to fetch admin logs Firestore:", error);
         return [];
     }
-
-    return data.map(mapLogToCamelCase);
 }
 
 /**
  * Get logs for specific admin
  */
 export async function getAdminLogsByAdminId(adminId: string, limitCount: number = 50): Promise<AdminLog[]> {
-    const supabase = createClient();
+    try {
+        const logsRef = collection(db, 'admin_logs');
+        const q = query(
+            logsRef,
+            where('admin_id', '==', adminId),
+            orderBy('timestamp', 'desc'),
+            firestoreLimit(limitCount)
+        );
+        const snapshot = await safeGetDocs(q);
 
-    const { data, error } = await supabase
-        .from('admin_logs')
-        .select('*')
-        .eq('admin_id', adminId)
-        .order('timestamp', { ascending: false })
-        .limit(limitCount);
-
-    if (error) return [];
-
-    return data.map(mapLogToCamelCase);
+        return snapshot.docs.map(doc => mapLogToCamelCase(doc.id, doc.data()));
+    } catch (error) {
+        console.error("Failed to fetch admin logs by adminId Firestore:", error);
+        return [];
+    }
 }
 
 /**
  * Get logs for specific target user
  */
 export async function getAdminLogsByTargetUser(targetUserId: string, limitCount: number = 50): Promise<AdminLog[]> {
-    const supabase = createClient();
+    try {
+        const logsRef = collection(db, 'admin_logs');
+        const q = query(
+            logsRef,
+            where('target_user_id', '==', targetUserId),
+            orderBy('timestamp', 'desc'),
+            firestoreLimit(limitCount)
+        );
+        const snapshot = await safeGetDocs(q);
 
-    const { data, error } = await supabase
-        .from('admin_logs')
-        .select('*')
-        .eq('target_user_id', targetUserId)
-        .order('timestamp', { ascending: false })
-        .limit(limitCount);
-
-    if (error) return [];
-
-    return data.map(mapLogToCamelCase);
+        return snapshot.docs.map(doc => mapLogToCamelCase(doc.id, doc.data()));
+    } catch (error) {
+        console.error("Failed to fetch admin logs by targetUser Firestore:", error);
+        return [];
+    }
 }

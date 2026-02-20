@@ -3,7 +3,23 @@
  * Secure authentication with RBAC, session management, and security tracking
  */
 
-import { createClient } from "@/lib/supabase/client";
+import { auth, db } from "@/lib/firebase";
+import {
+    signInWithEmailAndPassword,
+    signOut,
+    onAuthStateChanged
+} from "firebase/auth";
+import {
+    doc,
+    getDoc,
+    updateDoc,
+    collection,
+    addDoc,
+    query,
+    where,
+    setDoc
+} from "firebase/firestore";
+import { safeGetDoc, safeGetDocs } from "@/utils/firebase-utils";
 import {
     UserDocument,
     UserRole,
@@ -37,11 +53,12 @@ async function getClientIP(): Promise<string> {
  * Get device/browser information
  */
 function getDeviceInfo(): string {
+    if (typeof window === 'undefined') return "server";
     return navigator.userAgent || "unknown";
 }
 
 /**
- * Log admin activity to Supabase
+ * Log admin activity to Firestore
  */
 export async function logAdminActivity(
     adminId: string,
@@ -55,49 +72,39 @@ export async function logAdminActivity(
         [key: string]: any;
     }
 ): Promise<void> {
-    const supabase = createClient();
     try {
         const ipAddress = await getClientIP();
         const userAgent = getDeviceInfo();
 
-        // AdminLogs table
-        const { error } = await supabase.from('admin_logs').insert({
-            admin_id: adminId === 'unknown' ? null : adminId, // Handle unknown properly
+        await addDoc(collection(db, 'admin_logs'), {
+            admin_id: adminId === 'unknown' ? null : adminId,
             admin_email: adminEmail,
             action,
-            target_user_id: details?.targetUserId,
-            target_user_email: details?.targetUserEmail,
+            target_user_id: details?.targetUserId || null,
+            target_user_email: details?.targetUserEmail || null,
             ip_address: ipAddress,
             user_agent: userAgent,
-            details: details,
+            details: details || null,
             success,
             created_at: new Date().toISOString()
         });
-
-        if (error) throw error;
     } catch (error) {
-        console.error("Failed to log admin activity:", error);
+        console.error("Failed to log admin activity (Firestore):", error);
     }
 }
 
 /**
- * Get user document from Supabase
+ * Get user document from Firestore
  */
 export async function getUserDocument(uid: string): Promise<UserDocument | null> {
-    const supabase = createClient();
     try {
-        const { data, error } = await supabase
-            .from("users")
-            .select("*")
-            .eq("id", uid)
-            .single();
+        const userSnap = await safeGetDoc(doc(db, "users", uid));
+        if (!userSnap.exists()) return null;
 
-        if (error || !data) return null;
-
-        // Map snake_case to camelCase types if necessary, or casting
+        const data = userSnap.data();
         return { uid, ...data } as unknown as UserDocument;
     } catch (error) {
-        console.error("Failed to get user document:", error);
+        console.error("Failed to get user document (Firestore):", error);
         return null;
     }
 }
@@ -106,26 +113,17 @@ export async function getUserDocument(uid: string): Promise<UserDocument | null>
  * Update user's last login and reset login attempts
  */
 async function updateLoginSuccess(uid: string, ipAddress: string): Promise<void> {
-    const supabase = createClient();
     try {
-        await supabase.from("users").update({
-            // Assuming columns exist or mapped
-            // last_login: new Date().toISOString() ??
-            // Check schema. Users table usually has updated_at.
-            // storing metadata in metadata column if needed?
-            // Supabase Auth manages last_sign_in_at in auth.users, but we are updating public.users
+        await updateDoc(doc(db, "users", uid), {
             updated_at: new Date().toISOString(),
-            // Reset stats? 
-            // We might need to store login_attempts in a column or metadata
             metadata: {
                 lastLoginIP: ipAddress,
                 deviceInfo: getDeviceInfo(),
-                loginAttempts: 0 // Reset
+                loginAttempts: 0
             }
-            // columns?
-        }).eq("id", uid);
+        });
     } catch (error) {
-        console.error("Failed to update login success:", error);
+        console.error("Failed to update login success (Firestore):", error);
     }
 }
 
@@ -133,22 +131,26 @@ async function updateLoginSuccess(uid: string, ipAddress: string): Promise<void>
  * Increment login attempts and lock account if needed
  */
 async function incrementLoginAttempts(uid: string): Promise<void> {
-    const supabase = createClient();
     try {
         const userDoc = await getUserDocument(uid);
         if (!userDoc) return;
 
-        // This logic heavily depends on having fetched the user AND being able to update them
-        // If anon, we probably can't update public.users.
-        // Skipping implementation details that require server-side privileges for anon users.
-        console.warn("Skipping incrementLoginAttempts (RLS restriction likely)");
+        const currentAttempts = (userDoc.metadata as any)?.loginAttempts || 0;
+        const newAttempts = currentAttempts + 1;
 
-        // Pseudo-code for when we have an RPC
-        /*
-        const { error } = await supabase.rpc('increment_login_attempts', { user_id: uid });
-        */
+        const updates: any = {
+            "metadata.loginAttempts": newAttempts,
+            updated_at: new Date().toISOString()
+        };
+
+        if (newAttempts >= MAX_LOGIN_ATTEMPTS) {
+            updates.isActive = false;
+            updates.lockoutUntil = new Date(Date.now() + LOCKOUT_DURATION_MINUTES * 60000).toISOString();
+        }
+
+        await updateDoc(doc(db, "users", uid), updates);
     } catch (error) {
-        console.error("Failed to increment login attempts:", error);
+        console.error("Failed to increment login attempts (Firestore):", error);
     }
 }
 
@@ -189,35 +191,26 @@ export async function verifyAdminAccess(uid: string): Promise<RoleCheckResult> {
  * Admin login
  */
 export async function adminLogin(email: string, password: string): Promise<LoginResponse> {
-    const supabase = createClient();
     const normalizedEmail = email.toLowerCase().trim();
-    // IP fetch might be slow, do it async or parallel?
-    const ipAddress = "0.0.0.0"; // Placeholder or fetch
+    const ipAddress = await getClientIP();
 
     try {
-        // Step 1: Supabase Auth login
-        const { data, error } = await supabase.auth.signInWithPassword({
-            email: normalizedEmail,
-            password: password
-        });
-
-        if (error) throw error;
-        if (!data.user) throw new Error("No user returned");
-
-        const uid = data.user.id;
+        // Step 1: Firebase Auth login
+        const userCredential = await signInWithEmailAndPassword(auth, normalizedEmail, password);
+        const user = userCredential.user;
+        const uid = user.uid;
 
         // Step 2: Get user document
         const userDoc = await getUserDocument(uid);
 
         if (!userDoc) {
-            await supabase.auth.signOut();
+            await signOut(auth);
             return { success: false, error: "User profile not found", requiresSetup: true };
         }
 
         // Step 3: Check if account is active
         if (!userDoc.isActive) {
-            await supabase.auth.signOut();
-            // Logging might fail if we signed out? No, logAdminActivity uses new client.
+            await signOut(auth);
             await logAdminActivity(uid, userDoc.email, "FAILED_LOGIN", false, {
                 reason: "Account locked",
                 ipAddress,
@@ -227,7 +220,7 @@ export async function adminLogin(email: string, password: string): Promise<Login
 
         // Step 4: Check if user has admin role
         if (!isAdminRole(userDoc.role)) {
-            await supabase.auth.signOut();
+            await signOut(auth);
             await logAdminActivity(uid, userDoc.email, "FAILED_LOGIN", false, {
                 reason: "Insufficient permissions",
                 role: userDoc.role,
@@ -244,10 +237,8 @@ export async function adminLogin(email: string, password: string): Promise<Login
 
         return { success: true, user: userDoc };
     } catch (error: any) {
-        console.error("Login error:", error);
+        console.error("Login error (Firebase):", error);
 
-        // Try to get user by email for logging (NOT POSSIBLE with Supabase Client simply)
-        // We skip detailed user logging on failure to avoid leaking info or errors.
         await logAdminActivity("unknown", normalizedEmail, "FAILED_LOGIN", false, {
             reason: error.message || "Invalid credentials",
             ipAddress,
@@ -261,17 +252,14 @@ export async function adminLogin(email: string, password: string): Promise<Login
  * Admin logout
  */
 export async function adminLogout(): Promise<void> {
-    const supabase = createClient();
     try {
-        const { data: { user } } = await supabase.auth.getUser();
+        const user = auth.currentUser;
         if (user) {
-            // Assuming we can fetch email if needed, or just log ID
-            await logAdminActivity(user.id, user.email || 'unknown', "LOGOUT", true);
+            await logAdminActivity(user.uid, user.email || 'unknown', "LOGOUT", true);
         }
-
-        await supabase.auth.signOut();
+        await signOut(auth);
     } catch (error) {
-        console.error("Logout error:", error);
+        console.error("Logout error (Firebase):", error);
     }
 }
 
@@ -279,12 +267,11 @@ export async function adminLogout(): Promise<void> {
  * Get current session data
  */
 export async function getCurrentSession(): Promise<SessionData | null> {
-    const supabase = createClient();
     try {
-        const { data: { session } } = await supabase.auth.getSession();
-        if (!session?.user) return null;
+        const user = auth.currentUser;
+        if (!user) return null;
 
-        const userDoc = await getUserDocument(session.user.id);
+        const userDoc = await getUserDocument(user.uid);
         if (!userDoc || !userDoc.isActive) return null;
 
         return {
@@ -295,7 +282,7 @@ export async function getCurrentSession(): Promise<SessionData | null> {
             lastVerified: Date.now(),
         };
     } catch (error) {
-        console.error("Failed to get session:", error);
+        console.error("Failed to get session (Firebase):", error);
         return null;
     }
 }
@@ -332,5 +319,5 @@ export async function checkPermission(
     if (!session) return false;
 
     const { ROLE_PERMISSIONS } = await import("@/types/auth");
-    return ROLE_PERMISSIONS[session.role][action] as boolean;
+    return (ROLE_PERMISSIONS[session.role] as any)[action] as boolean;
 }

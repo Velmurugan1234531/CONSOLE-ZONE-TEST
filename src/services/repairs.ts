@@ -1,4 +1,16 @@
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    query,
+    where,
+    orderBy,
+    addDoc,
+    updateDoc,
+    doc,
+    getDoc,
+    getDocs
+} from "firebase/firestore";
+import { safeGetDoc, safeGetDocs } from "@/utils/firebase-utils";
 
 export type RepairStatus = 'pending' | 'diagnosing' | 'awaiting_parts' | 'repairing' | 'testing' | 'ready' | 'completed' | 'cancelled';
 export type RepairPriority = 'low' | 'medium' | 'high' | 'urgent';
@@ -73,76 +85,58 @@ const saveMockRepairs = (tickets: RepairTicket[]) => {
 };
 
 export const getRepairTickets = async (): Promise<RepairTicket[]> => {
-    const supabase = createClient();
-
     try {
-        const { data, error } = await supabase
-            .from('repair_tickets')
-            .select('*')
-            .order('created_at', { ascending: false });
+        const repairsRef = collection(db, 'repair_tickets');
+        const q = query(repairsRef, orderBy('created_at', 'desc'));
+        const snapshot = await safeGetDocs(q);
 
-        if (error) {
-            console.warn("Repairs service: Supabase unavailable, returning mocks", error);
-            // If empty or error, return mock data for initial setup/demo feel
+        if (snapshot.empty) {
             return getMockRepairs();
         }
 
-        if (!data || data.length === 0) {
-            return getMockRepairs();
-        }
-
-        const tickets = data.map((doc: any) => ({
+        const tickets = snapshot.docs.map((doc) => ({
             id: doc.id,
-            ...doc
+            ...doc.data()
         } as RepairTicket));
 
-        if (tickets.length > 0) saveMockRepairs(tickets);
+        saveMockRepairs(tickets);
         return tickets;
-
     } catch (error) {
-        console.warn("Repairs service: Supabase unavailable, returning mocks", error);
+        console.warn("Repairs service: Firestore fetch failed, returning mocks", error);
         return getMockRepairs();
     }
 };
 
 export const updateRepairStatus = async (id: string, status: RepairStatus, technician?: string): Promise<void> => {
-    const supabase = createClient();
-
     try {
+        const ticketRef = doc(db, 'repair_tickets', id);
         const updates: any = {
             status,
             updated_at: new Date().toISOString()
         };
         if (technician) updates.technician_name = technician;
 
-        const { error } = await supabase
-            .from('repair_tickets')
-            .update(updates)
-            .eq('id', id);
-
-        if (error) throw error;
+        await updateDoc(ticketRef, updates);
 
         // Notification logic
         try {
-            const { data: ticket } = await supabase
-                .from('repair_tickets')
-                .select('*')
-                .eq('id', id)
-                .single();
-
-            if (ticket && ticket.user_id) {
-                const { sendNotification } = await import("./notifications");
-                await sendNotification({
-                    user_id: ticket.user_id,
-                    type: status === 'ready' ? 'success' : status === 'cancelled' ? 'error' : 'info',
-                    title: `Repair Update: ${status.toUpperCase()}`,
-                    message: status === 'ready'
-                        ? `Great news! Your ${ticket.device_name} is ready for pickup.`
-                        : `Your ${ticket.device_name} repair status has been updated to ${status}.`
-                });
+            const ticketSnap = await safeGetDoc(ticketRef);
+            if (ticketSnap.exists()) {
+                const ticket = ticketSnap.data();
+                if (ticket.user_id) {
+                    const { sendNotification } = await import("./notifications");
+                    await sendNotification({
+                        user_id: ticket.user_id,
+                        type: status === 'ready' ? 'success' : status === 'cancelled' ? 'error' : 'info',
+                        title: `Repair Update: ${status.toUpperCase()}`,
+                        message: status === 'ready'
+                            ? `Great news! Your ${ticket.device_name} is ready for pickup.`
+                            : `Your ${ticket.device_name} repair status has been updated to ${status}.`
+                    });
+                }
             }
         } catch (e: any) {
-            console.warn(`Failed to send repair notification: ${e?.message || e}`);
+            console.warn(`Failed to send repair notification Firestore: ${e?.message || e}`);
         }
 
     } catch (error: any) {
@@ -163,23 +157,16 @@ export const updateRepairStatus = async (id: string, status: RepairStatus, techn
 };
 
 export const createRepairTicket = async (ticket: Partial<RepairTicket>): Promise<void> => {
-    const ticketData = {
+    const payload = {
         ...ticket,
-        id: `REP-${Date.now()}`, // Generate ID mainly for client-side optimistics, though DB can gen UUID or we stick to this format
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
         status: ticket.status || 'pending',
         priority: ticket.priority || 'medium'
     };
 
-    const supabase = createClient();
-
     try {
-        const { error } = await supabase
-            .from('repair_tickets')
-            .insert(ticketData);
-
-        if (error) throw error;
+        await addDoc(collection(db, 'repair_tickets'), payload);
 
         if (ticket.user_id) {
             try {
@@ -190,14 +177,14 @@ export const createRepairTicket = async (ticket: Partial<RepairTicket>): Promise
                     title: 'Repair Ticket Opened',
                     message: `Your repair ticket for ${ticket.device_name} has been created.`
                 });
-            } catch (e) { console.warn("Notification error", e); }
+            } catch (e) { console.warn("Notification error Firestore", e); }
         }
         return;
     } catch (error) {
-        console.error("createRepairTicket failed:", error);
+        console.error("createRepairTicket Firestore failed:", error);
         // Fallback if DB is not available
         const current = getMockRepairs();
-        current.push({ ...ticketData, id: `REP-DEMO-${Date.now()}` } as RepairTicket);
+        current.push({ ...payload, id: `REP-DEMO-${Date.now()}` } as RepairTicket);
         saveMockRepairs(current);
     }
 };

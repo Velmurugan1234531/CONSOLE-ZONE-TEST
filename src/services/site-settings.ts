@@ -1,4 +1,11 @@
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import {
+    doc,
+    setDoc,
+    deleteDoc,
+    serverTimestamp
+} from "firebase/firestore";
+import { safeGetDoc } from "@/utils/firebase-utils";
 
 export interface PageSEO {
     title: string;
@@ -20,8 +27,8 @@ export interface SiteSettings {
 }
 
 const STORAGE_KEY = 'site_settings';
-// Supabase settings table key
-const SETTINGS_DB_KEY = 'site_settings';
+// Firestore settings document ID
+const SETTINGS_DOC_ID = 'site_settings';
 
 const DEFAULT_SETTINGS: SiteSettings = {
     siteTitle: "Console Zone",
@@ -63,12 +70,12 @@ const DEFAULT_SETTINGS: SiteSettings = {
 };
 
 /**
- * Get site settings from Supabase (Async) or LocalStorage (Fallback)
+ * Get site settings from Firestore (Async) or LocalStorage (Fallback)
  */
 export const fetchSiteSettings = async (): Promise<SiteSettings> => {
     if (typeof window === 'undefined') return DEFAULT_SETTINGS;
 
-    // Check localStorage first for immediate render if valid
+    // Check localStorage first
     const saved = localStorage.getItem(STORAGE_KEY);
     let localSettings: SiteSettings | null = null;
     if (saved) {
@@ -77,32 +84,23 @@ export const fetchSiteSettings = async (): Promise<SiteSettings> => {
         } catch (e) { console.warn("Invalid local settings", e); }
     }
 
-    const supabase = createClient();
-
     try {
-        const { data, error } = await supabase
-            .from('settings')
-            .select('value')
-            .eq('key', SETTINGS_DB_KEY)
-            .single();
-
-        if (data && !error) {
-            const remoteSettings = data.value as SiteSettings;
-
-            // Sync with local storage
+        const settingsSnap = await safeGetDoc(doc(db, "settings", SETTINGS_DOC_ID));
+        if (settingsSnap.exists()) {
+            const remoteSettings = settingsSnap.data() as SiteSettings;
             const mergedSettings = { ...DEFAULT_SETTINGS, ...remoteSettings };
             localStorage.setItem(STORAGE_KEY, JSON.stringify(mergedSettings));
             return mergedSettings;
         }
     } catch (e: any) {
-        console.error("Failed to fetch from Supabase:", e?.message || e);
+        console.error("Failed to fetch settings from Firestore:", e?.message || e);
     }
 
     return localSettings || DEFAULT_SETTINGS;
 };
 
 /**
- * Sync version for legacy components (returns last known cached state)
+ * Sync version for legacy components
  */
 export const getSiteSettings = (): SiteSettings => {
     if (typeof window === 'undefined') return DEFAULT_SETTINGS;
@@ -116,30 +114,21 @@ export const getSiteSettings = (): SiteSettings => {
 };
 
 /**
- * Save site settings to Supabase and LocalStorage
+ * Save site settings to Firestore and LocalStorage
  */
 export const saveSiteSettings = async (settings: SiteSettings) => {
     if (typeof window === 'undefined') return;
 
     try {
-        // Fetch current mainly for announcement comparison (optional optimization, skipped for speed)
         const oldSettings = getSiteSettings();
-
-        // Save to LocalStorage immediately for responsive UI
         localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
 
-        const supabase = createClient();
-        const { error } = await supabase
-            .from('settings')
-            .upsert({
-                key: SETTINGS_DB_KEY,
-                value: settings,
-                updated_at: new Date().toISOString()
-            }, { onConflict: 'key' });
+        await setDoc(doc(db, "settings", SETTINGS_DOC_ID), {
+            ...settings,
+            updated_at: new Date().toISOString()
+        });
 
-        if (error) throw error;
-
-        // Global Announcement Link
+        // Global Announcement notification
         if (settings.announcement && settings.announcement !== oldSettings?.announcement) {
             try {
                 const { sendNotification } = await import("./notifications");
@@ -153,7 +142,7 @@ export const saveSiteSettings = async (settings: SiteSettings) => {
             }
         }
     } catch (e) {
-        console.error("Failed to save to Supabase:", e);
+        console.error("Failed to save to Firestore:", e);
     }
 };
 
@@ -161,13 +150,9 @@ export const resetSiteSettings = async () => {
     if (typeof window === 'undefined') return;
     localStorage.removeItem(STORAGE_KEY);
 
-    const supabase = createClient();
     try {
-        await supabase
-            .from('settings')
-            .delete()
-            .eq('key', SETTINGS_DB_KEY);
+        await deleteDoc(doc(db, "settings", SETTINGS_DOC_ID));
     } catch (e) {
-        console.error("Failed to reset in Supabase:", e);
+        console.error("Failed to reset in Firestore:", e);
     }
 };

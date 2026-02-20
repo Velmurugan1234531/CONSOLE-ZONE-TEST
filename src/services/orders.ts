@@ -1,5 +1,16 @@
-
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    query,
+    where,
+    orderBy,
+    doc,
+    getDoc,
+    updateDoc,
+    addDoc,
+    setDoc
+} from "firebase/firestore";
+import { safeGetDocs, safeGetDoc } from "@/utils/firebase-utils";
 
 export interface OrderItem {
     product_id: string;
@@ -72,55 +83,67 @@ const DEMO_ORDERS: Order[] = [
  * Get all orders from database or fallback to demo data
  */
 export const getAllOrders = async (): Promise<Order[]> => {
-    const supabase = createClient();
     try {
-        const { data, error } = await supabase
-            .from('orders')
-            .select('*')
-            .order('created_at', { ascending: false });
+        const ordersRef = collection(db, "orders");
+        const q = query(ordersRef, orderBy("created_at", "desc"));
+        const snapshot = await safeGetDocs(q);
 
-        if (error) throw error;
+        if (snapshot.empty) {
+            console.warn("Firestore orders empty, using fallback/cache");
+            return getFallbackOrders();
+        }
+
+        const orders = snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+        })) as Order[];
 
         // Store in localStorage on success
-        if (typeof window !== 'undefined' && data && data.length > 0) {
-            localStorage.setItem(ORDERS_STORAGE_KEY, JSON.stringify(data));
+        if (typeof window !== 'undefined' && orders.length > 0) {
+            localStorage.setItem(ORDERS_STORAGE_KEY, JSON.stringify(orders));
         }
 
-        return data as Order[];
+        return orders;
     } catch (error) {
-        console.warn('Failed to fetch orders from Supabase/DB, using fallback:', error);
-
-        // Try localStorage first
-        if (typeof window !== 'undefined') {
-            const stored = localStorage.getItem(ORDERS_STORAGE_KEY);
-            if (stored) {
-                return JSON.parse(stored);
-            }
-        }
-
-        // Return demo data as last resort
-        return DEMO_ORDERS;
+        console.warn('Failed to fetch orders from Firestore, using fallback:', error);
+        return getFallbackOrders();
     }
+};
+
+const getFallbackOrders = (): Order[] => {
+    // Try localStorage first
+    if (typeof window !== 'undefined') {
+        const stored = localStorage.getItem(ORDERS_STORAGE_KEY);
+        if (stored) {
+            try {
+                return JSON.parse(stored);
+            } catch (e) { }
+        }
+    }
+    // Return demo data as last resort
+    return DEMO_ORDERS;
 };
 
 /**
  * Get a single order by ID
  */
 export const getOrderById = async (id: string): Promise<Order | null> => {
-    const supabase = createClient();
     try {
-        const { data, error } = await supabase
-            .from('orders')
-            .select('*')
-            .eq('id', id)
-            .single();
+        const orderRef = doc(db, "orders", id);
+        const orderSnap = await safeGetDoc(orderRef);
 
-        if (error || !data) throw new Error("Order not found");
-        return data as Order;
+        if (!orderSnap.exists()) {
+            // Try fallback search
+            const allOrders = await getAllOrders();
+            return allOrders.find(order => order.id === id) || null;
+        }
+
+        return {
+            id: orderSnap.id,
+            ...orderSnap.data()
+        } as Order;
     } catch (error) {
-        console.warn('Failed to fetch order from database:', error);
-
-        // Fallback to localStorage or demo data
+        console.warn('Failed to fetch order from Firestore:', error);
         const allOrders = await getAllOrders();
         return allOrders.find(order => order.id === id) || null;
     }
@@ -130,23 +153,19 @@ export const getOrderById = async (id: string): Promise<Order | null> => {
  * Create a new order
  */
 export const createOrder = async (orderData: Omit<Order, 'id' | 'created_at'>): Promise<Order> => {
-    const supabase = createClient();
     const newOrderData = {
         ...orderData,
         created_at: new Date().toISOString()
     };
 
     try {
-        const { data, error } = await supabase
-            .from('orders')
-            .insert(newOrderData)
-            .select()
-            .single();
-
-        if (error) throw error;
-        return data as Order;
+        const docRef = await addDoc(collection(db, "orders"), newOrderData);
+        return {
+            id: docRef.id,
+            ...newOrderData
+        } as Order;
     } catch (error) {
-        console.warn('Failed to create order in database, saving to localStorage:', error);
+        console.warn('Failed to create order in Firestore, saving to localStorage:', error);
 
         const newOrder = {
             id: `ord-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
@@ -168,16 +187,14 @@ export const createOrder = async (orderData: Omit<Order, 'id' | 'created_at'>): 
  * Update order status
  */
 export const updateOrderStatus = async (id: string, status: Order['status']): Promise<void> => {
-    const supabase = createClient();
     try {
-        const { error } = await supabase
-            .from('orders')
-            .update({ status, updated_at: new Date().toISOString() })
-            .eq('id', id);
-
-        if (error) throw error;
+        const orderRef = doc(db, "orders", id);
+        await updateDoc(orderRef, {
+            status,
+            updated_at: new Date().toISOString()
+        });
     } catch (error) {
-        console.warn('Failed to update order status in database:', error);
+        console.warn('Failed to update order status in Firestore:', error);
 
         // Fallback to localStorage
         if (typeof window !== 'undefined') {
@@ -203,7 +220,7 @@ export const searchOrders = async (filters: {
     dateFrom?: string;
     dateTo?: string;
 }): Promise<Order[]> => {
-    // Ideally this should use Supabase compound queries, but for now filtering in memory
+    // Ideally this should use Firestore queries, but for now filtering in memory
     // to match the previous behavior and support the varied optional filters easily
     const allOrders = await getAllOrders();
 
@@ -222,18 +239,17 @@ export const searchOrders = async (filters: {
  * Get orders by customer ID
  */
 export const getOrdersByCustomer = async (customerId: string): Promise<Order[]> => {
-    const supabase = createClient();
     try {
-        const { data, error } = await supabase
-            .from('orders')
-            .select('*')
-            .eq('customer_id', customerId)
-            .order('created_at', { ascending: false });
+        const ordersRef = collection(db, "orders");
+        const q = query(ordersRef, where("customer_id", "==", customerId), orderBy("created_at", "desc"));
+        const snapshot = await safeGetDocs(q);
 
-        if (error) throw error;
-        return data as Order[];
+        return snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+        })) as Order[];
     } catch (e) {
-        console.warn("Supabase getOrdersByCustomer failed, falling back to search", e);
+        console.warn("Firestore getOrdersByCustomer failed, falling back to search", e);
         return searchOrders({ customerId });
     }
 };

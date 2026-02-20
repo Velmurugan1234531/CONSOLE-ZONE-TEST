@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Calendar, Check, ChevronRight, Cpu, User, Wrench, AlertTriangle, Loader2 } from "lucide-react";
 import { ServiceItem } from "@/types";
-import { createClient } from "@/lib/supabase/client";
+import { useAuth } from "@/context/AuthContext";
 import { createServiceBooking } from "@/services/service-booking";
 import { useRouter } from "next/navigation";
 
@@ -15,10 +15,9 @@ interface ServiceBookingFormProps {
 
 export default function ServiceBookingForm({ preselectedServiceId, services }: ServiceBookingFormProps) {
     const router = useRouter();
+    const { user, userDocument, loading: authLoading } = useAuth();
     const [step, setStep] = useState(1);
     const [loading, setLoading] = useState(false);
-    const [user, setUser] = useState<any>(null);
-    const supabase = createClient();
 
     const [formData, setFormData] = useState({
         serviceId: preselectedServiceId || "",
@@ -32,67 +31,21 @@ export default function ServiceBookingForm({ preselectedServiceId, services }: S
     });
 
     useEffect(() => {
-        const checkUser = async () => {
-            const { data: { user: currentUser } } = await supabase.auth.getUser();
-            if (currentUser) {
-                setUser(currentUser);
-
-                // Fetch Profile from Supabase
-                const { data: profile } = await supabase
-                    .from('users')
-                    .select('*')
-                    .eq('id', currentUser.id)
-                    .single();
-
-                if (profile) {
-                    setFormData(prev => ({
-                        ...prev,
-                        contactName: profile.full_name || "",
-                        contactEmail: profile.email || currentUser.email || "",
-                        contactPhone: profile.phone || ""
-                    }));
-                }
-            }
-        };
-
-        checkUser();
-
-        const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-            if (session?.user) {
-                setUser(session.user);
-                const { data: profile } = await supabase
-                    .from('users')
-                    .select('*')
-                    .eq('id', session.user.id)
-                    .single();
-
-                if (profile) {
-                    setFormData(prev => ({
-                        ...prev,
-                        contactName: profile.full_name || "",
-                        contactEmail: profile.email || session.user.email || "",
-                        contactPhone: profile.phone || ""
-                    }));
-                }
-            } else {
-                setUser(null);
-            }
-        });
-
-        return () => {
-            subscription.unsubscribe();
-        };
-    }, []);
+        if (userDocument) {
+            setFormData(prev => ({
+                ...prev,
+                contactName: userDocument.fullName || "",
+                contactEmail: userDocument.email || user?.email || "",
+                contactPhone: userDocument.phone || ""
+            }));
+        }
+    }, [userDocument, user]);
 
     const handleSubmit = async () => {
         setLoading(true);
         try {
-            if (!user) {
-                // Formatting data for guest if needed, currently we assume login or guest flow is handled by service
-            }
-
             const bookingData: any = {
-                user_id: user?.id || null, // Supabase uses 'id' not 'uid'
+                user_id: user?.uid || null,
                 service_id: formData.serviceId,
                 device_model: formData.deviceModel,
                 serial_number: formData.serialNumber,

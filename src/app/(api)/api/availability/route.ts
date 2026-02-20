@@ -1,7 +1,5 @@
 import { NextResponse } from "next/server";
 import { BookingLogic } from "@/services/booking-logic";
-import { createClient } from "@/lib/supabase/server";
-import { cookies } from "next/headers";
 
 export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
@@ -13,11 +11,9 @@ export async function GET(request: Request) {
     }
 
     const [year, monthNum] = month.split("-").map(Number);
-    const cookieStore = await cookies();
-    const supabase = createClient(cookieStore);
 
     try {
-        const availability = await BookingLogic.getAvailabilityForMonth(category, year, monthNum, supabase);
+        const availability = await BookingLogic.getAvailabilityForMonth(category, year, monthNum);
         return NextResponse.json(availability);
     } catch (error) {
         console.error("Availability API Error:", error);

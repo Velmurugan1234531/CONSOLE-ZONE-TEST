@@ -1,15 +1,13 @@
-
-import { createClient } from "@/lib/supabase/client";
-import { User } from "@supabase/supabase-js";
+import { auth, db } from "@/lib/firebase";
+import { doc, getDoc } from "firebase/firestore";
+import { safeGetDoc } from "@/utils/firebase-utils";
 
 export const AuthService = {
     /**
-     * Get the current authenticated user from Supabase.
+     * Get the current authenticated user from Firebase.
      */
-    getUser: async (): Promise<User | null> => {
-        const supabase = createClient();
-        const { data: { user } } = await supabase.auth.getUser();
-        return user;
+    getUser: async (): Promise<any | null> => {
+        return auth.currentUser;
     },
 
     /**
@@ -30,16 +28,10 @@ export const AuthService = {
             }
         }
 
-        const supabase = createClient();
-
         try {
-            const { data, error } = await supabase
-                .from("users")
-                .select("role")
-                .eq("id", userId)
-                .single();
-
-            if (data && !error) {
+            const userSnap = await safeGetDoc(doc(db, "users", userId));
+            if (userSnap.exists()) {
+                const data = userSnap.data();
                 return data.role as any || 'customer';
             }
         } catch (error) {
@@ -64,10 +56,10 @@ export const AuthService = {
             }
         }
 
-        const user = await AuthService.getUser();
+        const user = auth.currentUser;
         if (!user) return false;
 
-        const role = await AuthService.getRole(user.id);
+        const role = await AuthService.getRole(user.uid);
         return role === 'admin' || role === 'super_admin';
     }
 };

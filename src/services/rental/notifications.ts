@@ -1,13 +1,11 @@
-
 import { sendNotification } from "@/services/notifications";
-import { SupabaseClient } from "@supabase/supabase-js";
 
 export const RentalNotificationService = {
     /**
-     * Send Push Notification to User via FCM -> Legacy
-     * Now routes to internal Supabase Notifications.
+     * Send Push Notification to User
+     * Routes to internal Firestore Notifications.
      */
-    sendToUser: async (userId: string, title: string, body: string, data?: Record<string, any>, supabaseClient?: SupabaseClient) => {
+    sendToUser: async (userId: string, title: string, body: string, data?: Record<string, any>) => {
         try {
             await sendNotification({
                 user_id: userId,
@@ -15,7 +13,7 @@ export const RentalNotificationService = {
                 title,
                 message: body,
                 metadata: data
-            }, supabaseClient);
+            });
 
             console.log(`📲 Notification stored for ${userId}: ${title}`);
 
@@ -27,43 +25,39 @@ export const RentalNotificationService = {
     /**
      * Standard Rental Events
      */
-    notifyBookingCreated: async (userId: string, bookingId: string, supabaseClient?: SupabaseClient) => {
+    notifyBookingCreated: async (userId: string, bookingId: string) => {
         await RentalNotificationService.sendToUser(
             userId,
             "Booking Received 📅",
             "We have received your rental request. It is currently under review.",
-            { bookingId, type: 'info' }, // mapped type
-            supabaseClient
+            { bookingId, type: 'info' }
         );
     },
 
-    notifyPaymentSuccess: async (userId: string, bookingId: string, supabaseClient?: SupabaseClient) => {
+    notifyPaymentSuccess: async (userId: string, bookingId: string) => {
         await RentalNotificationService.sendToUser(
             userId,
             "Payment Confirmed ✅",
             "Your payment was successful. We are generating your invoice.",
-            { bookingId, type: 'success' },
-            supabaseClient
+            { bookingId, type: 'success' }
         );
     },
 
-    notifyApproval: async (userId: string, bookingId: string, supabaseClient?: SupabaseClient) => {
+    notifyApproval: async (userId: string, bookingId: string) => {
         await RentalNotificationService.sendToUser(
             userId,
             "Rental Approved 🚀",
             "Great news! Your rental request has been approved. A rider will be assigned shortly.",
-            { bookingId, type: 'success' },
-            supabaseClient
+            { bookingId, type: 'success' }
         );
     },
 
-    notifyRiderAssigned: async (userId: string, riderName: string, bookingId: string, supabaseClient?: SupabaseClient) => {
+    notifyRiderAssigned: async (userId: string, riderName: string, bookingId: string) => {
         await RentalNotificationService.sendToUser(
             userId,
             "Rider Assigned 🛵",
             `${riderName} is on the way with your console!`,
-            { bookingId, type: 'info' },
-            supabaseClient
+            { bookingId, type: 'info' }
         );
     }
 };

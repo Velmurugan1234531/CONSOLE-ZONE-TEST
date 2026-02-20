@@ -1,4 +1,17 @@
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    query,
+    where,
+    orderBy,
+    doc,
+    getDoc,
+    updateDoc,
+    addDoc,
+    deleteDoc,
+    writeBatch
+} from "firebase/firestore";
+import { safeGetDocs, safeGetDoc } from "@/utils/firebase-utils";
 
 export interface CatalogSettings {
     id: string;
@@ -17,7 +30,7 @@ export interface CatalogSettings {
     features?: string[];
 }
 
-// DEMO DATA for testing without Supabase
+// DEMO DATA for testing without Supabase/Firestore
 const DEMO_CATALOG_SETTINGS: CatalogSettings[] = [
     {
         id: "demo-cat-1",
@@ -93,44 +106,41 @@ const loadDemoSettings = (): CatalogSettings[] => {
 };
 
 export const getCatalogSettings = async (): Promise<CatalogSettings[]> => {
-    const supabase = createClient();
     try {
-        const { data, error } = await supabase
-            .from('catalog_settings')
-            .select('*')
-            .order('created_at', { ascending: true }); // Using created_at since display_order might not be in DB yet
+        const catalogRef = collection(db, "catalog_settings");
+        const q = query(catalogRef, orderBy("display_order", "asc"));
+        const snapshot = await safeGetDocs(q);
 
-        if (error) {
-            console.warn("Catalog fetch Supabase fail:", error);
+        if (snapshot.empty) {
+            console.warn("Firestore catalog empty, using demo fallback");
             return loadDemoSettings();
         }
 
-        if (!data || data.length === 0) {
-            console.warn("Supabase catalog empty, using demo fallback");
-            return loadDemoSettings();
-        }
-
-        return data as CatalogSettings[];
+        return snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+        })) as CatalogSettings[];
     } catch (e) {
-        console.warn("Catalog fetch failed:", e);
+        console.warn("Catalog fetch Firestore failed:", e);
         return loadDemoSettings();
     }
 };
 
 export const getCatalogSettingsByCategory = async (category: string): Promise<CatalogSettings | null> => {
-    const supabase = createClient();
     try {
-        const { data, error } = await supabase
-            .from('catalog_settings')
-            .select('*')
-            .eq('device_category', category)
-            .single();
+        const catalogRef = collection(db, "catalog_settings");
+        const q = query(catalogRef, where("device_category", "==", category));
+        const snapshot = await safeGetDocs(q);
 
-        if (error || !data) {
+        if (snapshot.empty) {
             return loadDemoSettings().find(c => c.device_category === category) || null;
         }
 
-        return data as CatalogSettings;
+        const doc = snapshot.docs[0];
+        return {
+            id: doc.id,
+            ...doc.data()
+        } as CatalogSettings;
     } catch (e) {
         console.warn(`Catalog category fetch failed for ${category}:`, e);
         return loadDemoSettings().find(c => c.device_category === category) || null;
@@ -141,18 +151,14 @@ export const updateCatalogSettings = async (
     category: string,
     updates: Partial<CatalogSettings>
 ): Promise<CatalogSettings | null> => {
-    const supabase = createClient();
     try {
-        const { data, error } = await supabase
-            .from('catalog_settings')
-            .update(updates)
-            .eq('device_category', category)
-            .select()
-            .single();
+        const catalogRef = collection(db, "catalog_settings");
+        const q = query(catalogRef, where("device_category", "==", category));
+        const snapshot = await safeGetDocs(q);
 
-        if (error) {
-            console.error("Supabase update catalog failed:", error);
-            // Fallback to demo update for seamless UI
+        if (snapshot.empty) {
+            console.error("Firestore update catalog failed: Category not found");
+            // Fallback to demo update
             const currentSettings = loadDemoSettings();
             const index = currentSettings.findIndex(c => c.device_category === category);
             if (index !== -1) {
@@ -164,9 +170,20 @@ export const updateCatalogSettings = async (
             return null;
         }
 
-        return data as CatalogSettings;
+        const catalogDoc = snapshot.docs[0];
+        const docRef = doc(db, "catalog_settings", catalogDoc.id);
+        await updateDoc(docRef, {
+            ...updates,
+            updated_at: new Date().toISOString()
+        });
+
+        return {
+            id: catalogDoc.id,
+            ...catalogDoc.data(),
+            ...updates
+        } as CatalogSettings;
     } catch (e) {
-        console.error("Update catalog failed:", e);
+        console.error("Update catalog Firestore failed:", e);
         return null;
     }
 };
@@ -174,41 +191,34 @@ export const updateCatalogSettings = async (
 export const createCatalogSettings = async (
     settings: Omit<CatalogSettings, 'id'>
 ): Promise<CatalogSettings | null> => {
-    const supabase = createClient();
     try {
-        const { data, error } = await supabase
-            .from('catalog_settings')
-            .insert(settings)
-            .select()
-            .single();
+        const docRef = await addDoc(collection(db, "catalog_settings"), {
+            ...settings,
+            created_at: new Date().toISOString()
+        });
 
-        if (error) {
-            console.error("Supabase create catalog failed:", error);
-            // Fallback
-            const newSetting: CatalogSettings = { ...settings, id: `demo-cat-${Date.now()}` };
-            const currentSettings = loadDemoSettings();
-            currentSettings.push(newSetting);
-            persistDemoSettings(currentSettings);
-            return newSetting;
-        }
-
-        return data as CatalogSettings;
+        return {
+            id: docRef.id,
+            ...settings
+        } as CatalogSettings;
     } catch (e) {
-        console.error("Create catalog failed:", e);
-        return null;
+        console.error("Create catalog Firestore failed:", e);
+        // Fallback
+        const newSetting: CatalogSettings = { ...settings, id: `demo-cat-${Date.now()}` };
+        const currentSettings = loadDemoSettings();
+        currentSettings.push(newSetting);
+        persistDemoSettings(currentSettings);
+        return newSetting;
     }
 };
 
 export const deleteCatalogSettings = async (category: string): Promise<boolean> => {
-    const supabase = createClient();
     try {
-        const { error } = await supabase
-            .from('catalog_settings')
-            .delete()
-            .eq('device_category', category);
+        const catalogRef = collection(db, "catalog_settings");
+        const q = query(catalogRef, where("device_category", "==", category));
+        const snapshot = await safeGetDocs(q);
 
-        if (error) {
-            console.error("Supabase delete catalog failed:", error);
+        if (snapshot.empty) {
             // Fallback
             const currentSettings = loadDemoSettings();
             const index = currentSettings.findIndex(c => c.device_category === category);
@@ -220,9 +230,10 @@ export const deleteCatalogSettings = async (category: string): Promise<boolean> 
             return false;
         }
 
+        await deleteDoc(doc(db, "catalog_settings", snapshot.docs[0].id));
         return true;
     } catch (e) {
-        console.error("Delete catalog failed:", e);
+        console.error("Delete catalog Firestore failed:", e);
         return false;
     }
 };
@@ -231,27 +242,36 @@ export const renameCategory = async (
     oldCategory: string,
     newCategory: string
 ): Promise<boolean> => {
-    const supabase = createClient();
     try {
-        // 1. Update catalog_settings
-        const { error: catError } = await supabase
-            .from('catalog_settings')
-            .update({ device_category: newCategory })
-            .eq('device_category', oldCategory);
+        const batch = writeBatch(db);
 
-        if (catError) throw catError;
+        // 1. Update catalog_settings
+        const catalogRef = collection(db, "catalog_settings");
+        const q = query(catalogRef, where("device_category", "==", oldCategory));
+        const snapshot = await safeGetDocs(q);
+
+        if (!snapshot.empty) {
+            batch.update(doc(db, "catalog_settings", snapshot.docs[0].id), {
+                device_category: newCategory,
+                updated_at: new Date().toISOString()
+            });
+        }
 
         // 2. Update devices collection
-        const { error: devError } = await supabase
-            .from('devices')
-            .update({ category: newCategory })
-            .eq('category', oldCategory);
+        const devicesRef = collection(db, "devices");
+        const devQ = query(devicesRef, where("category", "==", oldCategory));
+        const devSnap = await safeGetDocs(devQ);
 
-        if (devError) console.warn("Failed to update related devices during rename:", devError);
+        devSnap.docs.forEach(deviceDoc => {
+            batch.update(doc(db, "devices", deviceDoc.id), {
+                category: newCategory
+            });
+        });
 
+        await batch.commit();
         return true;
     } catch (e: any) {
-        console.error(`Supabase renaming failure: ${e?.message || e}`);
+        console.error(`Firestore renaming failure: ${e?.message || e}`);
 
         // Fallback
         const currentSettings = loadDemoSettings();

@@ -1,5 +1,14 @@
-
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    query,
+    where,
+    getDocs,
+    doc,
+    getDoc,
+    limit as firestoreLimit
+} from "firebase/firestore";
+import { safeGetDocs, safeGetDoc } from "@/utils/firebase-utils";
 import { startOfWeek, startOfMonth, subDays, format } from "date-fns";
 
 export interface RevenueStats {
@@ -32,65 +41,42 @@ export interface RevenueDataPoint {
  * Get revenue statistics for different time periods
  */
 export const getRevenueStats = async (): Promise<RevenueStats> => {
-    const supabase = createClient();
     const now = new Date();
     const todayStart = new Date(now.setHours(0, 0, 0, 0)).toISOString();
-    const weekStart = startOfWeek(now).toISOString();
-    const monthStart = startOfMonth(now).toISOString();
+    const weekStart = startOfWeek(new Date()).toISOString();
+    const monthStart = startOfMonth(new Date()).toISOString();
 
     try {
-        // Fetch completed rentals and paid orders
-        // Optimization: In a real app, we might want to pre-aggregate this or use distributed counters
+        const rentalsRef = collection(db, 'rentals');
+        const qRentals = query(rentalsRef, where('status', '==', 'completed'));
+        const rentalsSnap = await safeGetDocs(qRentals);
 
-        // Supabase select
-        const { data: rentals, error: rentalsError } = await supabase
-            .from('rentals')
-            .select('total_price, created_at') // fetch only needed fields
-            .eq('status', 'completed'); // 'completed' status. Check schema if enum.
+        const ordersRef = collection(db, 'orders');
+        const qOrders = query(ordersRef, where('payment_status', '==', 'paid'));
+        const ordersSnap = await safeGetDocs(qOrders);
 
-        const { data: orders, error: ordersError } = await supabase
-            .from('orders')
-            .select('total_amount, created_at')
-            .eq('payment_status', 'paid');
-        // .eq('status', 'completed'); // Maybe check payment_status 'paid'? Original looked for paid.
+        const rentalList = rentalsSnap.docs.map(doc => doc.data());
+        const orderList = ordersSnap.docs.map(doc => doc.data());
 
-        if (rentalsError || ordersError) throw rentalsError || ordersError;
-
-        const rentalList = rentals || [];
-        const orderList = orders || [];
-
-        // Calculate today's revenue
-        const todayRevenue = [
-            ...rentalList.filter((r: any) => r.created_at >= todayStart).map((r: any) => r.total_price),
-            ...orderList.filter((o: any) => o.created_at >= todayStart).map((o: any) => o.total_amount)
-        ].reduce((sum, amount) => sum + Number(amount), 0);
-
-        // Calculate week's revenue
-        const weekRevenue = [
-            ...rentalList.filter((r: any) => r.created_at >= weekStart).map((r: any) => r.total_price),
-            ...orderList.filter((o: any) => o.created_at >= weekStart).map((o: any) => o.total_amount)
-        ].reduce((sum, amount) => sum + Number(amount), 0);
-
-        // Calculate month's revenue
-        const monthRevenue = [
-            ...rentalList.filter((r: any) => r.created_at >= monthStart).map((r: any) => r.total_price),
-            ...orderList.filter((o: any) => o.created_at >= monthStart).map((o: any) => o.total_amount)
-        ].reduce((sum, amount) => sum + Number(amount), 0);
-
-        // Calculate total revenue
-        const totalRevenue = [
-            ...rentalList.map((r: any) => r.total_price),
-            ...orderList.map((o: any) => o.total_amount)
-        ].reduce((sum, amount) => sum + Number(amount), 0);
+        // Helper to sum
+        const calculateSum = (start: string | null) => {
+            const rentalSum = rentalList
+                .filter(r => !start || (r.created_at || r.updated_at) >= start)
+                .reduce((sum, r) => sum + Number(r.total_price || r.total_cost || 0), 0);
+            const orderSum = orderList
+                .filter(o => !start || o.created_at >= start)
+                .reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
+            return rentalSum + orderSum;
+        };
 
         return {
-            today: todayRevenue,
-            week: weekRevenue,
-            month: monthRevenue,
-            total: totalRevenue
+            today: calculateSum(todayStart),
+            week: calculateSum(weekStart),
+            month: calculateSum(monthStart),
+            total: calculateSum(null)
         };
     } catch (error) {
-        console.warn('Analytics fetch failed:', error);
+        console.warn('Firestore analytics fetch failed:', error);
         return { today: 0, week: 0, month: 0, total: 0 };
     }
 };
@@ -99,27 +85,23 @@ export const getRevenueStats = async (): Promise<RevenueStats> => {
  * Get fleet utilization statistics
  */
 export const getUtilizationStats = async (): Promise<UtilizationStats> => {
-    const supabase = createClient();
     try {
         // Active Rentals
-        const { count: activeRentals, error: rentalsError } = await supabase
-            .from('rentals')
-            .select('*', { count: 'exact', head: true })
-            .in('status', ['active', 'overdue']); // 'active' might be 'RENTAL_ACTIVE'? Check rental types.
-        // Using logic from original file: ['active', 'overdue']
+        const rentalsRef = collection(db, 'rentals');
+        // Accept multiple active statuses
+        const activeSnap = await safeGetDocs(rentalsRef);
+        const activeCount = activeSnap.docs.filter(doc =>
+            ['active', 'overdue', 'RENTAL_ACTIVE'].includes(doc.data().status)
+        ).length;
 
         // Total Consoles
-        // 'products' table where type='rental'? or 'consoles' table? 
-        // Original used 'db, "products"'.
-        const { count: totalConsoles, error: consolesError } = await supabase
-            .from('products')
-            .select('*', { count: 'exact', head: true })
-            .eq('type', 'rental'); // Assuming type filtering is better if table shared
+        const productsRef = collection(db, 'products');
+        const productsSnap = await safeGetDocs(productsRef);
+        // Map types carefully: 'rental' vs 'Rental'
+        const totalCount = productsSnap.docs.filter(doc =>
+            doc.data().type?.toLowerCase() === 'rental' || doc.data().category?.toLowerCase() === 'console'
+        ).length || 1;
 
-        if (rentalsError || consolesError) throw rentalsError || consolesError;
-
-        const activeCount = activeRentals || 0;
-        const totalCount = totalConsoles || 1; // avoid divide by zero
         const utilizationRate = Math.round((activeCount / totalCount) * 100);
 
         return {
@@ -128,7 +110,7 @@ export const getUtilizationStats = async (): Promise<UtilizationStats> => {
             utilizationRate
         };
     } catch (error) {
-        console.warn('Utilization fetch failed:', error);
+        console.warn('Utilization fetch failed (Firestore):', error);
         return { activeRentals: 0, totalConsoles: 0, utilizationRate: 0 };
     }
 };
@@ -137,63 +119,48 @@ export const getUtilizationStats = async (): Promise<UtilizationStats> => {
  * Get top customers by revenue
  */
 export const getTopCustomers = async (limit: number = 5): Promise<TopCustomer[]> => {
-    const supabase = createClient();
     try {
-        // Fetch completed rentals with user data
-        // Assuming 'rentals' has FK to 'users'.
-        const { data: rentals, error } = await supabase
-            .from('rentals')
-            .select('user_id, total_price, users(id, full_name, email)') // join users
-            .eq('status', 'completed');
+        const rentalsRef = collection(db, 'rentals');
+        const q = query(rentalsRef, where('status', '==', 'completed'));
+        const snapshot = await safeGetDocs(q);
 
-        if (error) throw error;
-        if (!rentals) return [];
+        if (snapshot.empty) return [];
 
-        // Group by user and calculate totals
-        const userMap = new Map<string, { name: string; email: string; totalSpent: number; count: number }>();
+        const userGroups = new Map<string, { totalSpent: number; count: number }>();
+        snapshot.docs.forEach(docSnap => {
+            const data = docSnap.data();
+            const uid = data.user_id;
+            if (!uid) return;
 
-        rentals.forEach((rental: any) => {
-            const userId = rental.user_id;
-            // If user join worked, rental.users should be object or array? 
-            // supabase-js returns single object if FK is 1:1 or N:1.
-            const user = rental.users || {};
-
-            // Should be 'full_name', 'email' from joined user.
-            // Note: rental.users might be null if user deleted?
-            const userName = user.full_name || 'Unknown';
-            const userEmail = user.email || '';
-
-            if (!userId) return;
-
-            const existing = userMap.get(userId) || {
-                name: userName,
-                email: userEmail,
-                totalSpent: 0,
-                count: 0
-            };
-
-            existing.totalSpent += Number(rental.total_price);
+            const existing = userGroups.get(uid) || { totalSpent: 0, count: 0 };
+            existing.totalSpent += Number(data.total_price || data.total_cost || 0);
             existing.count += 1;
-
-            // Update name/email if "Unknown" became known (unlikely with this logic, but safe)
-            if (existing.name === 'Unknown' && userName !== 'Unknown') existing.name = userName;
-
-            userMap.set(userId, existing);
+            userGroups.set(uid, existing);
         });
 
-        // Convert to array and sort by totalSpent
-        return Array.from(userMap.entries())
-            .map(([id, data]) => ({
-                id,
-                name: data.name,
-                email: data.email,
-                totalSpent: data.totalSpent,
-                rentalCount: data.count
-            }))
-            .sort((a, b) => b.totalSpent - a.totalSpent)
+        // Convert to array and sort
+        const sortedUsers = Array.from(userGroups.entries())
+            .sort((a, b) => b[1].totalSpent - a[1].totalSpent)
             .slice(0, limit);
+
+        // Fetch user profiles for display names
+        const topCustomers = await Promise.all(sortedUsers.map(async ([uid, stats]) => {
+            const userRef = doc(db, 'users', uid);
+            const userSnap = await safeGetDoc(userRef);
+            const userData = userSnap.exists() ? userSnap.data() : {};
+
+            return {
+                id: uid,
+                name: userData.full_name || userData.displayName || 'Anonymous User',
+                email: userData.email || 'No email',
+                totalSpent: stats.totalSpent,
+                rentalCount: stats.count
+            };
+        }));
+
+        return topCustomers;
     } catch (error) {
-        console.warn('Top customers fetch failed:', error);
+        console.warn('Top customers fetch failed (Firestore):', error);
         return [];
     }
 };
@@ -202,25 +169,17 @@ export const getTopCustomers = async (limit: number = 5): Promise<TopCustomer[]>
  * Get revenue trend data for the last N days
  */
 export const getRevenueTrend = async (days: number = 7): Promise<RevenueDataPoint[]> => {
-    const supabase = createClient();
     try {
         const startDate = subDays(new Date(), days).toISOString();
 
-        const { data: rentals, error: rentalsError } = await supabase
-            .from('rentals')
-            .select('total_price, created_at')
-            .gte('created_at', startDate)
-            .eq('status', 'completed');
+        const rentalsRef = collection(db, 'rentals');
+        const ordersRef = collection(db, 'orders');
 
-        const { data: orders, error: ordersError } = await supabase
-            .from('orders')
-            .select('total_amount, created_at')
-            .gte('created_at', startDate)
-            .eq('payment_status', 'paid');
+        const [rentalsSnap, ordersSnap] = await Promise.all([
+            safeGetDocs(query(rentalsRef, where('status', '==', 'completed'))),
+            safeGetDocs(query(ordersRef, where('payment_status', '==', 'paid')))
+        ]);
 
-        if (rentalsError || ordersError) throw rentalsError || ordersError;
-
-        // Group by date
         const dateMap = new Map<string, number>();
 
         // Initialize all dates with 0
@@ -229,22 +188,32 @@ export const getRevenueTrend = async (days: number = 7): Promise<RevenueDataPoin
             dateMap.set(date, 0);
         }
 
-        // Add rental revenue
-        (rentals || []).forEach((rental: any) => {
-            const date = format(new Date(rental.created_at), 'MMM dd');
-            dateMap.set(date, (dateMap.get(date) || 0) + Number(rental.total_price));
+        // Aggregate rentals
+        rentalsSnap.docs.forEach(docSnap => {
+            const data = docSnap.data();
+            const createdAt = data.created_at || data.updated_at;
+            if (createdAt && createdAt >= startDate) {
+                const date = format(new Date(createdAt), 'MMM dd');
+                if (dateMap.has(date)) {
+                    dateMap.set(date, (dateMap.get(date) || 0) + Number(data.total_price || data.total_cost || 0));
+                }
+            }
         });
 
-        // Add order revenue
-        (orders || []).forEach((order: any) => {
-            const date = format(new Date(order.created_at), 'MMM dd');
-            dateMap.set(date, (dateMap.get(date) || 0) + Number(order.total_amount));
+        // Aggregate orders
+        ordersSnap.docs.forEach(docSnap => {
+            const data = docSnap.data();
+            if (data.created_at && data.created_at >= startDate) {
+                const date = format(new Date(data.created_at), 'MMM dd');
+                if (dateMap.has(date)) {
+                    dateMap.set(date, (dateMap.get(date) || 0) + Number(data.total_amount || 0));
+                }
+            }
         });
 
-        // Convert to array
         return Array.from(dateMap.entries()).map(([date, revenue]) => ({ date, revenue }));
     } catch (error) {
-        console.warn('Revenue trend fetch failed:', error);
+        console.warn('Revenue trend fetch failed (Firestore):', error);
         return [];
     }
 };
@@ -256,12 +225,12 @@ export const exportRentalsToCSV = (rentals: any[]): void => {
     const headers = ['ID', 'Customer', 'Product', 'Start Date', 'End Date', 'Status', 'Total Price', 'Payment Method'];
     const rows = rentals.map(rental => [
         rental.id,
-        rental.user?.full_name || rental.customer_name || 'Unknown', // Fallback to rental.customer_name if denormalized
+        rental.user?.full_name || rental.customer_name || 'Unknown',
         rental.product?.name || rental.product_name || 'Unknown',
         new Date(rental.start_date).toLocaleDateString(),
         new Date(rental.end_date).toLocaleDateString(),
         rental.status,
-        `₹${rental.total_price}`,
+        `₹${rental.total_price || rental.total_cost || 0}`,
         rental.payment_method || 'N/A'
     ]);
 
@@ -270,14 +239,15 @@ export const exportRentalsToCSV = (rentals: any[]): void => {
         ...rows.map(row => row.map(cell => `"${cell}"`).join(','))
     ].join('\n');
 
-    // Create blob and download
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    const url = URL.createObjectURL(blob);
-    link.setAttribute('href', url);
-    link.setAttribute('download', `rentals_export_${format(new Date(), 'yyyy-MM-dd')}.csv`);
-    link.style.visibility = 'hidden';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    if (typeof window !== 'undefined') {
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement('a');
+        const url = URL.createObjectURL(blob);
+        link.setAttribute('href', url);
+        link.setAttribute('download', `rentals_export_${format(new Date(), 'yyyy-MM-dd')}.csv`);
+        link.style.visibility = 'hidden';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }
 };

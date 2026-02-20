@@ -1,7 +1,9 @@
 "use client";
 
 import { useState } from "react";
-// import { createClient } from "@/lib/supabase/client";
+import { auth, db } from "@/lib/firebase";
+import { createUserWithEmailAndPassword, updateProfile, signInWithPopup, GoogleAuthProvider } from "firebase/auth";
+import { doc, setDoc, getDoc, serverTimestamp } from "firebase/firestore";
 import { motion } from "framer-motion";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -19,7 +21,6 @@ export default function SignupPage() {
     const [success, setSuccess] = useState(false);
     const router = useRouter();
     const { settings } = useVisuals();
-    // const supabase = createClient();
 
     const handleSignup = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -27,10 +28,6 @@ export default function SignupPage() {
         setError(null);
 
         try {
-            const { auth, db } = await import("@/lib/firebase");
-            const { createUserWithEmailAndPassword, updateProfile } = await import("firebase/auth");
-            const { doc, setDoc, serverTimestamp } = await import("firebase/firestore");
-
             // 1. Create Authentication User
             const userCredential = await createUserWithEmailAndPassword(auth, email, password);
             const user = userCredential.user;
@@ -61,21 +58,17 @@ export default function SignupPage() {
         }
     };
 
-    const handleOAuthLogin = async (provider: 'google' | 'apple') => {
+    const handleOAuthLogin = async (providerName: 'google' | 'apple') => {
         setLoading(true);
         setError(null);
 
-        if (provider !== 'google') {
-            setError(`${provider} signup is not yet supported. Please use Google or Email.`);
+        if (providerName !== 'google') {
+            setError(`${providerName} signup is not yet supported. Please use Google or Email.`);
             setLoading(false);
             return;
         }
 
         try {
-            const { auth, db } = await import("@/lib/firebase");
-            const { signInWithPopup, GoogleAuthProvider } = await import("firebase/auth");
-            const { doc, getDoc, setDoc, serverTimestamp } = await import("firebase/firestore");
-
             const provider = new GoogleAuthProvider();
             const result = await signInWithPopup(auth, provider);
             const user = result.user;

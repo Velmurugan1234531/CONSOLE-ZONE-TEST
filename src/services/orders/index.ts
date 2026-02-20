@@ -1,15 +1,28 @@
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    addDoc,
+    getDoc,
+    getDocs,
+    doc,
+    query,
+    orderBy,
+    where
+} from "firebase/firestore";
+import { safeGetDocs, safeGetDoc } from "@/utils/firebase-utils";
 import { Order } from "@/types";
+
+const COLLECTION = 'orders';
 
 export const OrderService = {
     /**
      * Create a new secure order transaction.
      */
     createOrder: async (userId: string, items: any[], total: number) => {
-        const supabase = createClient();
         try {
+            const orderId = `ORD-${Date.now()}`;
             const orderData = {
-                id: `ORD-${Date.now()}`, // Generate ID client side or let UUID default if changed to UUID. Using text ID like old system for now.
+                id: orderId,
                 user_id: userId,
                 total_amount: total,
                 status: 'pending',
@@ -18,16 +31,10 @@ export const OrderService = {
                 created_at: new Date().toISOString()
             };
 
-            const { data, error } = await supabase
-                .from('orders')
-                .insert(orderData)
-                .select()
-                .single();
-
-            if (error) throw error;
-            return { ...orderData, id: data.id }; // Ensure ID is correct one
+            await addDoc(collection(db, COLLECTION), orderData);
+            return orderData;
         } catch (error) {
-            console.error("Error creating order:", error);
+            console.error("Error creating order (Firestore):", error);
             throw error;
         }
     },
@@ -36,15 +43,15 @@ export const OrderService = {
      * Get real-time status of an order.
      */
     getOrderStatus: async (orderId: string) => {
-        const supabase = createClient();
         try {
-            const { data, error } = await supabase
-                .from('orders')
-                .select('status, tracking_id, payment_status')
-                .eq('id', orderId)
-                .single();
+            // Since we use custom IDs in data but Firestore generates its own doc IDs if we use addDoc,
+            // we should ideally query by the 'id' field if we used addDoc, or use setDoc with orderId.
+            // For now, assume we query by the 'id' field for consistency with legacy.
+            const q = query(collection(db, COLLECTION), where('id', '==', orderId));
+            const snapshot = await safeGetDocs(q);
 
-            if (data && !error) {
+            if (!snapshot.empty) {
+                const data = snapshot.docs[0].data();
                 return {
                     status: data.status,
                     tracking_id: data.tracking_id,
@@ -53,41 +60,48 @@ export const OrderService = {
             }
             return null;
         } catch (error) {
-            console.error("Error fetching order status:", error);
+            console.error("Error fetching order status (Firestore):", error);
             return null;
         }
     }
 };
 
 export async function getOrders(): Promise<Order[]> {
-    const supabase = createClient();
     try {
-        const { data, error } = await supabase
-            .from('orders')
-            .select(`
-                *,
-                user:users!user_id(full_name, email)
-            `)
-            .order('created_at', { ascending: false });
+        const q = query(collection(db, COLLECTION), orderBy('created_at', 'desc'));
+        const snapshot = await safeGetDocs(q);
 
-        if (error) {
-            // Fallback or just return empty
-            console.warn("Supabase fetch orders failed", error);
+        if (snapshot.empty) {
             return [];
         }
 
-        const orders = data.map((d: any) => ({
-            id: d.id,
-            ...d,
-            user: {
-                full_name: d.user?.full_name || d.user?.email || 'Unknown User',
-                email: d.user?.email || 'N/A'
+        const orders = await Promise.all(snapshot.docs.map(async (docSnap) => {
+            const d = docSnap.data();
+
+            // Enrich with user data
+            let userData = { full_name: 'Unknown User', email: 'N/A' };
+            if (d.user_id) {
+                const userRef = doc(db, 'users', d.user_id);
+                const userSnap = await safeGetDoc(userRef);
+                if (userSnap.exists()) {
+                    const u = userSnap.data();
+                    userData = {
+                        full_name: u.full_name || u.displayName || u.email || 'Unknown User',
+                        email: u.email || 'N/A'
+                    };
+                }
             }
-        })) as any as Order[];
+
+            return {
+                id: d.id || docSnap.id,
+                ...d,
+                user: userData
+            } as any as Order;
+        }));
 
         return orders;
     } catch (error) {
-        console.error("Error fetching orders:", error);
+        console.error("Error fetching orders (Firestore):", error);
         return [];
     }
 }

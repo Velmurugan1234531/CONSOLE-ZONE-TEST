@@ -1,5 +1,14 @@
-
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    query,
+    where,
+    orderBy,
+    doc,
+    updateDoc,
+    getDoc
+} from "firebase/firestore";
+import { safeGetDocs, safeGetDoc } from "@/utils/firebase-utils";
 
 // Types based on usage in component
 export interface RentalRequest {
@@ -23,57 +32,69 @@ export interface RentalRequest {
 }
 
 export const getRentalRequests = async (showAll = false): Promise<RentalRequest[]> => {
-    const supabase = createClient();
-
     try {
-        let query = supabase
-            .from('rentals')
-            .select(`
-                *,
-                user:users!user_id (email, full_name, metadata),
-                product:products!product_id (name, images)
-            `)
-            .order('created_at', { ascending: false });
+        const rentalsRef = collection(db, "rentals");
+        let q = query(rentalsRef, orderBy("created_at", "desc"));
 
         if (!showAll) {
-            query = query.eq('status', 'Pending');
+            q = query(rentalsRef, where("status", "==", "Pending"), orderBy("created_at", "desc"));
         }
 
-        const { data, error } = await query;
+        const snapshot = await safeGetDocs(q);
 
-        if (error) {
-            console.warn("Supabase Fetch Failed. Switching to Offline/Demo Requests.");
+        if (snapshot.empty) {
+            console.log("No rentals found in Firestore. Using Mock Data.");
             return getMockRentals(showAll);
         }
 
-        // Map Supabase result to expected structure
-        // Note: Relation handling depends on FK setup in Supabase.
-        // If relations fail, we might need manual fetch, but let's try standard joins first.
-        // fallback to mock if data is empty might be confusing, so let's valid empty array
-        if (!data || data.length === 0) return [];
+        const rentals = await Promise.all(snapshot.docs.map(async (rentalDoc) => {
+            const rental = rentalDoc.data();
 
-        return data.map((rental: any) => ({
-            id: rental.id,
-            status: rental.status,
-            total_price: rental.total_price,
-            start_date: rental.start_date,
-            end_date: rental.end_date,
-            duration_plan: rental.duration_plan,
-            created_at: rental.created_at,
-            user: {
-                full_name: rental.user?.full_name || rental.user?.display_name || rental.user?.email || "Unknown",
-                email: rental.user?.email || "",
-                phone: rental.user?.metadata?.phone, // Accessing JSONB metadata
-                avatar_url: rental.user?.metadata?.avatar_url
-            },
-            product: {
-                name: rental.product?.name || "Unknown Product",
-                images: rental.product?.images || []
+            // Fetch User Details
+            let userData: RentalRequest['user'] = { full_name: "Unknown", email: "" };
+            if (rental.user_id) {
+                const userSnap = await safeGetDoc(doc(db, "users", rental.user_id));
+                if (userSnap.exists()) {
+                    const u = userSnap.data();
+                    userData = {
+                        full_name: u.full_name || u.display_name || u.email || "Unknown",
+                        email: u.email || "",
+                        phone: u.phone || u.metadata?.phone,
+                        avatar_url: u.avatar_url || u.metadata?.avatar_url
+                    };
+                }
             }
+
+            // Fetch Product Details
+            let productData = { name: "Unknown Product", images: [] };
+            if (rental.product_id) {
+                const productSnap = await safeGetDoc(doc(db, "products", rental.product_id));
+                if (productSnap.exists()) {
+                    const p = productSnap.data();
+                    productData = {
+                        name: p.name || "Unknown Product",
+                        images: p.images || []
+                    };
+                }
+            }
+
+            return {
+                id: rentalDoc.id,
+                status: rental.status,
+                total_price: rental.total_price,
+                start_date: rental.start_date,
+                end_date: rental.end_date,
+                duration_plan: rental.duration_plan || rental.plan_id,
+                created_at: rental.created_at,
+                user: userData,
+                product: productData
+            } as RentalRequest;
         }));
 
+        return rentals;
+
     } catch (error) {
-        console.warn("getRentalRequests failed (Network/Auth). Using Mock Data.");
+        console.warn("getRentalRequests Firestore failed. Using Mock Data.", error);
         return getMockRentals(showAll);
     }
 };
@@ -105,38 +126,25 @@ const getMockRentals = (showAll: boolean): RentalRequest[] => {
 };
 
 export const approveRental = async (id: string, adminId?: string) => {
-    const supabase = createClient();
     try {
-        const { error } = await supabase
-            .from('rentals')
-            .update({
-                status: 'active',
-                updated_at: new Date().toISOString(),
-                // updated_by: adminId 
-            })
-            .eq('id', id);
-
-        if (error) throw error;
+        const rentalRef = doc(db, "rentals", id);
+        await updateDoc(rentalRef, {
+            status: 'active',
+            updated_at: new Date().toISOString()
+        });
     } catch (error) {
-        console.warn("approveRental mocked (Offline Mode).", error);
-        // Do not throw, treat as success for demo
+        console.warn("approveRental Firestore failed.", error);
     }
 };
 
 export const rejectRental = async (id: string, adminId?: string) => {
-    const supabase = createClient();
     try {
-        const { error } = await supabase
-            .from('rentals')
-            .update({
-                status: 'cancelled',
-                updated_at: new Date().toISOString()
-            })
-            .eq('id', id);
-
-        if (error) throw error;
+        const rentalRef = doc(db, "rentals", id);
+        await updateDoc(rentalRef, {
+            status: 'cancelled',
+            updated_at: new Date().toISOString()
+        });
     } catch (error) {
-        console.warn("rejectRental mocked (Offline Mode).", error);
-        // Do not throw, treat as success for demo
+        console.warn("rejectRental Firestore failed.", error);
     }
 };

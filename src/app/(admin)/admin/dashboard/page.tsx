@@ -2,8 +2,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { createClient } from "@/lib/supabase/client";
-import { getCurrentUserRole, AdminUser, adminSignOut } from "@/services/admin-auth";
+import { useAuth } from "@/context/AuthContext";
 import { getAdminLogs, AdminLog } from "@/services/admin-logs";
 import { motion } from "framer-motion";
 import {
@@ -20,41 +19,39 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 
 export default function AdminDashboardPage() {
-    const [currentUser, setCurrentUser] = useState<AdminUser | null>(null);
+    const { user, userDocument, loading: authLoading, signOut: authSignOut } = useAuth();
     const [recentLogs, setRecentLogs] = useState<AdminLog[]>([]);
-    const [loading, setLoading] = useState(true);
+    const [loadingLogs, setLoadingLogs] = useState(true);
     const router = useRouter();
-    const supabase = createClient();
 
     useEffect(() => {
-        loadDashboardData();
-    }, []);
+        if (userDocument) {
+            loadLogs();
+        }
+    }, [userDocument]);
 
-    const loadDashboardData = async () => {
-        const { data: { user } } = await supabase.auth.getUser();
-        if (!user) return;
-
+    const loadLogs = async () => {
         try {
-            const userData = await getCurrentUserRole(user.id);
-            setCurrentUser(userData);
-
             const logs = await getAdminLogs(10);
             setRecentLogs(logs);
         } catch (error) {
-            console.error("Failed to load dashboard data:", error);
+            console.error("Failed to load dashboard logs:", error);
         } finally {
-            setLoading(false);
+            setLoadingLogs(false);
         }
     };
 
     const handleLogout = async () => {
         try {
-            await adminSignOut();
+            await authSignOut();
             router.push("/admin/login");
         } catch (error) {
             console.error("Logout failed:", error);
         }
     };
+
+    const currentUser = userDocument;
+    const loading = authLoading || (user && loadingLogs);
 
     const getRoleBadgeColor = (role: string) => {
         switch (role) {
@@ -96,7 +93,7 @@ export default function AdminDashboardPage() {
                                     Admin Portal
                                 </h1>
                                 <p className="text-gray-500 text-xs font-black uppercase tracking-[0.2em]">
-                                    {currentUser?.displayName || "Loading..."}
+                                    {currentUser?.fullName || "Loading..."}
                                 </p>
                             </div>
                         </div>

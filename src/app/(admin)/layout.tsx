@@ -4,7 +4,6 @@ import React, { useEffect, useState, useRef } from "react";
 import { Inter } from "next/font/google";
 import "../globals.css";
 import QueryProvider from "../../providers/QueryProvider";
-import { createClient } from "@/lib/supabase/client";
 import { useRouter, usePathname } from "next/navigation";
 import { Loader2, ShieldAlert } from "lucide-react";
 import { VisualsProvider } from "@/context/visuals-context";

@@ -1,4 +1,22 @@
-import { createClient } from "@/lib/supabase/client";
+import { db, storage } from "@/lib/firebase";
+import {
+    ref,
+    uploadBytes,
+    getDownloadURL,
+    deleteObject
+} from "firebase/storage";
+import {
+    collection,
+    addDoc,
+    query,
+    where,
+    orderBy,
+    onSnapshot,
+    getDocs,
+    doc,
+    deleteDoc
+} from "firebase/firestore";
+import { safeGetDocs } from "@/utils/firebase-utils";
 
 export interface FileDocument {
     id: string;
@@ -11,132 +29,131 @@ export interface FileDocument {
     createdAt: string;
 }
 
-const supabase = createClient();
+const COLLECTION = 'file_records';
 
 export const uploadFile = async (userId: string, file: File, bucket: string = 'media') => {
-    // Generate unique filename
-    const fileExt = file.name.split('.').pop();
-    const fileName = `${Math.random().toString(36).substring(2)}_${Date.now()}.${fileExt}`;
-    const filePath = `${userId}/${fileName}`;
+    try {
+        // 1. Storage Upload
+        const fileExt = file.name.split('.').pop();
+        const fileName = `${Math.random().toString(36).substring(2)}_${Date.now()}.${fileExt}`;
+        const filePath = `${userId}/${fileName}`;
+        const storageRef = ref(storage, `${bucket}/${filePath}`);
 
-    const { data, error } = await supabase
-        .storage
-        .from(bucket)
-        .upload(filePath, file);
+        await uploadBytes(storageRef, file);
+        const publicUrl = await getDownloadURL(storageRef);
 
-    if (error) {
+        // 2. Database Record
+        await addDoc(collection(db, COLLECTION), {
+            user_id: userId,
+            name: file.name,
+            url: publicUrl,
+            size: file.size,
+            type: file.type,
+            storage_path: filePath,
+            bucket,
+            created_at: new Date().toISOString()
+        });
+
+        return publicUrl;
+    } catch (error: any) {
+        console.error("Upload failed (Firebase):", error);
         throw new Error(`Upload failed: ${error.message}`);
     }
-
-    // Get public URL
-    const { data: { publicUrl } } = supabase
-        .storage
-        .from(bucket)
-        .getPublicUrl(filePath);
-
-    // Save metadata to file_metrics or similar table if you want database records
-    // For now, we'll just return the URL. If you need a database record:
-    await supabase.from('file_records').insert({
-        user_id: userId,
-        name: file.name,
-        url: publicUrl,
-        size: file.size,
-        type: file.type,
-        storage_path: filePath,
-        bucket
-    });
-
-    return publicUrl;
 };
 
 export const listUserFiles = async (userId: string, bucket: string = 'media'): Promise<FileDocument[]> => {
-    const { data, error } = await supabase
-        .from('file_records')
-        .select('*')
-        .eq('user_id', userId)
-        .order('created_at', { ascending: false });
+    try {
+        const filesRef = collection(db, COLLECTION);
+        const q = query(
+            filesRef,
+            where('user_id', '==', userId),
+            orderBy('created_at', 'desc')
+        );
+        const snapshot = await safeGetDocs(q);
 
-    if (error) {
-        console.error("Error fetching files:", error);
+        return snapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+                id: doc.id,
+                userId: data.user_id,
+                name: data.name,
+                url: data.url,
+                size: data.size,
+                type: data.type,
+                storagePath: data.storage_path,
+                createdAt: data.created_at
+            };
+        });
+    } catch (error) {
+        console.error("Error fetching files (Firestore):", error);
         return [];
     }
-
-    return data.map(doc => ({
-        id: doc.id,
-        userId: doc.user_id,
-        name: doc.name,
-        url: doc.url,
-        size: doc.size,
-        type: doc.type,
-        storagePath: doc.storage_path,
-        createdAt: doc.created_at
-    }));
 };
 
 export const listFiles = async (bucket: string = 'media'): Promise<FileDocument[]> => {
-    const { data, error } = await supabase
-        .from('file_records')
-        .select('*')
-        .order('created_at', { ascending: false });
+    try {
+        const filesRef = collection(db, COLLECTION);
+        const q = query(filesRef, orderBy('created_at', 'desc'));
+        const snapshot = await safeGetDocs(q);
 
-    if (error) {
-        console.error("Error fetching all files:", error);
+        return snapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+                id: doc.id,
+                userId: data.user_id,
+                name: data.name,
+                url: data.url,
+                size: data.size,
+                type: data.type,
+                storagePath: data.storage_path,
+                createdAt: data.created_at
+            };
+        });
+    } catch (error) {
+        console.error("Error fetching all files (Firestore):", error);
         return [];
     }
-
-    return data.map(doc => ({
-        id: doc.id,
-        userId: doc.user_id,
-        name: doc.name,
-        url: doc.url,
-        size: doc.size,
-        type: doc.type,
-        storagePath: doc.storage_path,
-        createdAt: doc.created_at
-    }));
 };
 
 export const subscribeToFiles = (userId: string, callback: (files: FileDocument[]) => void) => {
-    // 1. Initial Load
-    listUserFiles(userId).then(callback);
+    const filesRef = collection(db, COLLECTION);
+    const q = query(
+        filesRef,
+        where('user_id', '==', userId),
+        orderBy('created_at', 'desc')
+    );
 
-    // 2. Realtime Subscription
-    const channel = supabase
-        .channel(`files_${userId}`)
-        .on('postgres_changes', {
-            event: '*',
-            schema: 'public',
-            table: 'file_records',
-            filter: `user_id=eq.${userId}`
-        }, () => {
-            listUserFiles(userId).then(callback);
-        })
-        .subscribe();
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+        const files = snapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+                id: doc.id,
+                userId: data.user_id,
+                name: data.name,
+                url: data.url,
+                size: data.size,
+                type: data.type,
+                storagePath: data.storage_path,
+                createdAt: data.created_at
+            };
+        });
+        callback(files);
+    });
 
-    return () => {
-        supabase.removeChannel(channel);
-    };
+    return unsubscribe;
 };
 
 export const deleteFile = async (userId: string, fileId: string, storagePath: string, bucket: string = 'media') => {
-    // 1. Remove from Storage
-    const { error: storageError } = await supabase
-        .storage
-        .from(bucket)
-        .remove([storagePath]);
+    try {
+        // 1. Storage Delete
+        const storageRef = ref(storage, `${bucket}/${storagePath}`);
+        await deleteObject(storageRef).catch(e => console.warn("Storage item already gone or access denied:", e));
 
-    if (storageError) {
-        console.error("Storage delete failed:", storageError);
-    }
+        // 2. Database Record Delete
+        await deleteDoc(doc(db, COLLECTION, fileId));
 
-    // 2. Remove from Database
-    const { error: dbError } = await supabase
-        .from('file_records')
-        .delete()
-        .eq('id', fileId)
-        .eq('user_id', userId);
-
-    if (dbError) {
-        throw new Error(`Delete failed: ${dbError.message}`);
+    } catch (error: any) {
+        console.error("Delete failed (Firebase):", error);
+        throw new Error(`Delete failed: ${error.message}`);
     }
 };

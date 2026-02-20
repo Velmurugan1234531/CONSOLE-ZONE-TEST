@@ -1,6 +1,12 @@
-
 import { useState, useEffect } from 'react';
-import { createClient } from "@/lib/supabase/client";
+import { db } from "@/lib/firebase";
+import {
+    collection,
+    query,
+    onSnapshot,
+    getDocs
+} from "firebase/firestore";
+import { safeGetDocs } from "@/utils/firebase-utils";
 import { DEMO_DEVICES } from "@/constants/demo-stock";
 import { CONSOLE_IMAGES } from "@/constants/images";
 import { Device } from "@/types";
@@ -104,66 +110,41 @@ export const StockService = {
     useStock: () => {
         const [stock, setStock] = useState<StockItem[]>([]);
         const [loading, setLoading] = useState(true);
-        const supabase = createClient();
 
-        const fetchStock = async (devicesOverride?: Device[]) => {
-            try {
-                let consoles: Device[] = devicesOverride || [];
+        useEffect(() => {
+            setLoading(true);
 
-                if (!devicesOverride) {
-                    // Fetch full list if not provided via realtime override
-                    // WRAPPER: Race against 5s timeout
-                    const fetchPromise = supabase
-                        .from('devices')
-                        .select('*')
-                        .then(({ data, error }) => {
-                            if (error) throw error;
-                            return data as unknown as Device[];
-                        });
+            const devicesRef = collection(db, "devices");
+            const q = query(devicesRef);
 
-                    const timeoutPromise = new Promise<Device[]>((_, reject) =>
-                        setTimeout(() => reject(new Error('Stock fetch timed out')), 5000)
-                    );
-
-                    consoles = await Promise.race([fetchPromise, timeoutPromise]);
-                }
-
-                const allDevices = getMergedDevices(consoles);
+            // Firestore Realtime Subscription
+            const unsubscribe = onSnapshot(q, (snapshot) => {
+                const dbDevices = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as unknown as Device));
+                const allDevices = getMergedDevices(dbDevices);
                 const result = aggregateStock(allDevices);
+
                 setStock(result);
+                setLoading(false);
 
                 if (typeof window !== 'undefined') {
                     localStorage.setItem(STOCK_KEY, JSON.stringify(result));
                 }
-            } catch (e) {
-                console.warn("Stock fetch error/timeout, using cache/demo:", e);
-                // Fallback to cache or demo data
+            }, (error) => {
+                console.warn("Stock Firestore subscription error, using cache/demo:", error);
                 const stored = typeof window !== 'undefined' ? localStorage.getItem(STOCK_KEY) : null;
                 setStock(stored ? JSON.parse(stored) : aggregateStock(getMergedDevices([])));
-            } finally {
                 setLoading(false);
-            }
-        };
+            });
 
-        useEffect(() => {
-            setLoading(true);
-            fetchStock();
-
-            // Realtime subscription
-            const channel = supabase
-                .channel('public:devices')
-                .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, (payload) => {
-                    console.log('Stock update:', payload);
-                    fetchStock(); // Re-fetch on any change for simplicity, or we could handle delta
-                })
-                .subscribe();
-
-            const listener = () => fetchStock();
+            const listener = () => {
+                // When local storage changes, we might want to re-process current Firestore data
+                // but for now we just rely on onSnapshot for DB changes.
+            };
             listeners.push(listener);
             window.addEventListener('storage', listener);
 
             return () => {
-                supabase.removeChannel(channel);
+                unsubscribe();
                 listeners = listeners.filter(l => l !== listener);
                 window.removeEventListener('storage', listener);
             };
@@ -173,17 +154,10 @@ export const StockService = {
     },
 
     getItems: async (): Promise<StockItem[]> => {
-        const supabase = createClient();
         try {
-            let consoles: Device[] = [];
-
-            const { data, error } = await supabase
-                .from('devices')
-                .select('*');
-
-            if (!error && data) {
-                consoles = data as unknown as Device[];
-            }
+            const devicesRef = collection(db, "devices");
+            const snapshot = await safeGetDocs(query(devicesRef));
+            const consoles = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as unknown as Device));
 
             return aggregateStock(getMergedDevices(consoles));
         } catch (e) {

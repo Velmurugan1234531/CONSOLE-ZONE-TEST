@@ -3,7 +3,6 @@
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import { Users as UsersIcon, Loader2, User as UserIcon, Mail, Calendar } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
 import { UserDocument } from "@/types/auth";
 
 export default function TeamMembersSection() {
@@ -15,23 +14,30 @@ export default function TeamMembersSection() {
     }, []);
 
     const loadUsers = async () => {
-        const supabase = createClient();
         try {
-            const { data, error } = await supabase
-                .from('users')
-                .select('*')
-                .order('created_at', { ascending: false });
+            const { db } = await import("@/lib/firebase");
+            const { collection, query, orderBy } = await import("firebase/firestore");
+            const { safeGetDocs } = await import("@/utils/firebase-utils");
 
-            if (error) throw error;
-            setUsers(data as any[]);
+            const usersRef = collection(db, "users");
+            const q = query(usersRef, orderBy("createdAt", "desc"));
+            const snapshot = await safeGetDocs(q);
+
+            const usersData = snapshot.docs.map(doc => ({
+                uid: doc.id,
+                ...doc.data()
+            })) as UserDocument[];
+
+            setUsers(usersData);
         } catch (error) {
-            console.error("Failed to load users:", error);
+            console.error("Failed to load users from Firestore:", error);
         } finally {
             setLoading(false);
         }
     };
 
     const formatDate = (timestamp: string) => {
+        if (!timestamp) return "N/A";
         return new Date(timestamp).toLocaleDateString("en-US", {
             month: "short",
             day: "numeric",
@@ -82,15 +88,15 @@ export default function TeamMembersSection() {
                             {/* Avatar */}
                             <div className="flex items-center gap-4 mb-4">
                                 <div className="w-12 h-12 rounded-full bg-[#A855F7]/20 border border-[#A855F7]/40 flex items-center justify-center overflow-hidden">
-                                    {user.avatar_url ? (
-                                        <img src={user.avatar_url} alt={user.full_name || 'User'} className="w-full h-full object-cover" />
+                                    {user.avatarUrl ? (
+                                        <img src={user.avatarUrl} alt={user.fullName || 'User'} className="w-full h-full object-cover" />
                                     ) : (
                                         <UserIcon className="text-[#A855F7]" size={24} />
                                     )}
                                 </div>
                                 <div className="flex-1 min-w-0">
                                     <h3 className="text-white font-bold truncate">
-                                        {user.full_name || "Unknown User"}
+                                        {user.fullName || "Unknown User"}
                                     </h3>
                                     {user.isActive && (
                                         <span className="inline-block px-2 py-0.5 bg-green-500/20 border border-green-500/30 rounded text-green-500 text-xs font-bold uppercase mt-1">
