@@ -19,7 +19,6 @@ import {
 import { useRouter } from "next/navigation";
 import { mapUserToCamelCase } from "@/services/admin-auth";
 import { resetOfflineMode, OfflineError } from "@/utils/firebase-utils";
-import { safeGetDoc } from "@/utils/firebase-utils";
 
 interface AuthContextType {
     user: User | null;
@@ -49,7 +48,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const fetchUserProfile = async (firebaseUser: User) => {
         try {
             const userDocRef = doc(db, "users", firebaseUser.uid);
-            const userDocSnap = await safeGetDoc(userDocRef);
+            // Use direct getDoc (no timeout) for auth — Firestore may need several seconds on cold-start
+            const userDocSnap = await getDoc(userDocRef);
 
             if (userDocSnap.exists()) {
                 const userData = mapUserToCamelCase({ id: firebaseUser.uid, ...userDocSnap.data() });
