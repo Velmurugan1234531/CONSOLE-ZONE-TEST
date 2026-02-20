@@ -23,7 +23,7 @@ export async function POST(req: Request) {
         } = body;
 
         // Initialize Supabase Client
-        const cookieStore = cookies();
+        const cookieStore = await cookies();
         const supabase = createClient(cookieStore);
 
         console.log("Booking Request Received:", {

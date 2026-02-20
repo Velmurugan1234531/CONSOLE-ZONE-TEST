@@ -8,7 +8,7 @@ export async function GET(req: Request) {
     // if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) { ... }
 
     try {
-        const cookieStore = cookies();
+        const cookieStore = await cookies();
         const supabase = createClient(cookieStore);
 
         // 1. Check for overdue rentals

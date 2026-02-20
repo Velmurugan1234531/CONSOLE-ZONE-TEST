@@ -695,6 +695,74 @@ export const getAllDevices = async () => {
     }
 };
 
+export const getFleetAnalytics = async () => {
+    try {
+        const devices = await getAllDevices();
+
+        // Calculate health metrics
+        const total = devices.length;
+        const maintenance = devices.filter(d => d.status === 'Maintenance' || d.status === 'Under-Repair').length;
+        const ready = devices.filter(d => d.status === 'Ready' || d.status === 'AVAILABLE').length;
+        const rented = devices.filter(d => d.status === 'Rented' || d.status === 'RENTED').length;
+
+        // Health distribution for charts
+        const healthDistribution = [
+            { name: 'Excellent', value: devices.filter(d => (d.health || 0) >= 90).length, color: '#10B981' },
+            { name: 'Good', value: devices.filter(d => (d.health || 0) >= 70 && (d.health || 0) < 90).length, color: '#3B82F6' },
+            { name: 'Fair', value: devices.filter(d => (d.health || 0) >= 50 && (d.health || 0) < 70).length, color: '#F59E0B' },
+            { name: 'Poor', value: devices.filter(d => (d.health || 0) < 50).length, color: '#EF4444' }
+        ];
+
+        return {
+            total,
+            ready,
+            rented,
+            maintenance,
+            healthDistribution
+        };
+    } catch (error) {
+        console.warn("getFleetAnalytics failed:", error);
+        return {
+            total: 0,
+            ready: 0,
+            rented: 0,
+            maintenance: 0,
+            healthDistribution: []
+        };
+    }
+};
+
+export const getSystemMetrics = async () => {
+    try {
+        // Mock system metrics aligned with Master Control HUD
+        return {
+            neural: {
+                healthScore: 98,
+                predictiveAccuracy: 0.94
+            },
+            integrations: {
+                firestore: 'active',
+                razorpay: 'active',
+                auth: 'active'
+            },
+            latencySeries: Array.from({ length: 20 }, (_, i) => ({
+                time: `${i}:00`,
+                value: Math.floor(Math.random() * 30) + 10
+            })),
+            database: {
+                latency: 24,
+                pool: 12
+            },
+            traffic: {
+                load: 0.15
+            }
+        };
+    } catch (error) {
+        console.warn("getSystemMetrics failed:", error);
+        return null;
+    }
+};
+
 export const updateDeviceStatus = async (id: string, status: string) => {
     try {
         const deviceRef = doc(db, "devices", id);

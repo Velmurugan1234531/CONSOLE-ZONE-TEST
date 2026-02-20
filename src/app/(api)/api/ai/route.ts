@@ -7,7 +7,7 @@ export async function POST(req: Request) {
         const { query: userQuery } = await req.json();
         const lowerQuery = userQuery.toLowerCase();
 
-        const cookieStore = cookies();
+        const cookieStore = await cookies();
         const supabase = createClient(cookieStore);
 
         let responseText = "I'm not sure how to help with that. Try asking about 'revenue', 'active rentals', or 'stock'.";
