@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+:root {
+  --background: #050505;
+  --foreground: #ffffff;
+
+  /* Console Zone Palette - Now Dynamic */
+  --accent-color: #A855F7;
+  /* Fallback */
+  --neon-purple: var(--accent-color);
+  --brand-dark-purple: #1a0533;
+  --neon-green: #39ff14;
+  --neon-accent: var(--accent-color);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-neon-purple: var(--neon-purple);
+  --color-brand-dark-purple: var(--brand-dark-purple);
+  --color-neon-green: var(--neon-green);
+  --color-neon-accent: var(--neon-accent);
+
+  --font-sans: var(--font-vt323), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-orbitron), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-vt323), ui-monospace, SFMono-Regular, monospace;
+}
+
+
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Ensure background component is visible through content */
+main {
+  background-color: transparent !important;
+}
+
+section {
+  background-color: transparent !important;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+.font-display {
+  font-family: var(--font-display);
+}
+
+/* Custom Scrollbar for Chrome/Safari/Webkit */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1a1a1a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--neon-purple);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--neon-accent);
+}
+
+@keyframes marquee {
+  0% {
+    transform: translateX(0);
+  }
+
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.animate-marquee {
+  animation: marquee 30s linear infinite;
+}
+
+.animate-spin-slow {
+  animation: spin 3s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
